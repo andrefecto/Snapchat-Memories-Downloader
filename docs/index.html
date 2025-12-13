@@ -58,6 +58,9 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
+    <!-- FFmpeg.wasm for video processing -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
     <style>
         * {
             margin: 0;
@@ -400,9 +403,33 @@
             <div style="margin-top: 25px; padding-top: 20px; border-top: 1px solid #dee2e6;">
                 <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 16px;">
                     <input type="checkbox" id="mergeOverlaysCheckbox" style="width: 18px; height: 18px; cursor: pointer;">
-                    <span><strong>Merge overlays</strong> (images only)</span>
+                    <span><strong>Merge overlays</strong> (images and videos)</span>
                 </label>
-                <p style="color: #666; margin-top: 10px; font-size: 14px; margin-left: 28px;">Combine -main and -overlay files into a single image. Videos will remain separate.</p>
+                <p style="color: #666; margin-top: 10px; font-size: 14px; margin-left: 28px;">
+                    Combine -main and -overlay files into a single file.
+                    Video merging uses FFmpeg.wasm (may take 1-5 minutes per video).
+                </p>
+            </div>
+
+            <div style="margin-top: 25px; padding-top: 20px; border-top: 1px solid #dee2e6;">
+                <div style="margin-bottom: 15px;">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 16px;">
+                        <input type="checkbox" id="videosOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer;">
+                        <span><strong>Videos only</strong> (skip pictures)</span>
+                    </label>
+                    <p style="color: #666; margin-top: 10px; font-size: 14px; margin-left: 28px;">
+                        Only download and process videos. Useful for re-processing videos with overlay merging.
+                    </p>
+                </div>
+                <div>
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 16px;">
+                        <input type="checkbox" id="picturesOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer;">
+                        <span><strong>Pictures only</strong> (skip videos)</span>
+                    </label>
+                    <p style="color: #666; margin-top: 10px; font-size: 14px; margin-left: 28px;">
+                        Only download and process pictures. Useful for re-processing images with overlay merging.
+                    </p>
+                </div>
             </div>
 
             <div style="margin-top: 25px; padding-top: 20px; border-top: 1px solid #dee2e6;">
@@ -509,6 +536,47 @@
         let existingMetadata = null;
         let currentIndex = 0;
         let zip = null;
+
+        // FFmpeg.wasm for video overlay merging
+        let ffmpegLoaded = false;
+        let ffmpegInstance = null;
+
+        /**
+         * Initialize FFmpeg.wasm instance
+         * Only loads once, cached for subsequent calls
+         */
+        async function initFFmpeg() {
+            if (ffmpegLoaded && ffmpegInstance) {
+                return ffmpegInstance;
+            }
+
+            try {
+                if (typeof FFmpegWASM === 'undefined') {
+                    throw new Error('FFmpeg.wasm library not loaded');
+                }
+
+                const { FFmpeg } = FFmpegWASM;
+                const { toBlobURL } = FFmpegUtil;
+
+                ffmpegInstance = new FFmpeg();
+
+                // Load FFmpeg core
+                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+                await ffmpegInstance.load({
+                    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+                });
+
+                ffmpegLoaded = true;
+                addLog('FFmpeg loaded successfully', 'success');
+                return ffmpegInstance;
+
+            } catch (error) {
+                addLog(`Failed to load FFmpeg: ${error.message}`, 'error');
+                ffmpegLoaded = false;
+                return null;
+            }
+        }
 
         /**
          * Parse Snapchat date string to JavaScript Date object
@@ -703,6 +771,85 @@
             });
         }
 
+        /**
+         * Merge overlay video on top of main video using FFmpeg.wasm
+         * @param {ArrayBuffer} mainData - Main video data
+         * @param {ArrayBuffer} overlayData - Overlay video data
+         * @param {Function} progressCallback - Optional progress callback (receives percentage)
+         * @returns {Promise<ArrayBuffer>} - Merged video
+         */
+        async function mergeVideoOverlay(mainData, overlayData, progressCallback) {
+            const ffmpeg = await initFFmpeg();
+
+            if (!ffmpeg) {
+                throw new Error('FFmpeg.wasm not available');
+            }
+
+            try {
+                // Write input files to FFmpeg virtual filesystem
+                await ffmpeg.writeFile('main.mp4', new Uint8Array(mainData));
+                await ffmpeg.writeFile('overlay.mp4', new Uint8Array(overlayData));
+
+                // Set up progress logging
+                ffmpeg.on('progress', ({ progress }) => {
+                    if (progressCallback) {
+                        const percent = Math.round(progress * 100);
+                        progressCallback(percent);
+                    }
+                });
+
+                // FFmpeg command arguments
+                const args = [
+                    '-i', 'main.mp4',
+                    '-i', 'overlay.mp4',
+                    '-filter_complex',
+                    '[0:v]fps=30,setsar=1[base];' +
+                    '[1:v]scale=w=iw(base):h=ih(base),fps=30,setsar=1,' +
+                    'loop=loop=-1:size=32767:start=0,setpts=N/FRAME_RATE/TB[ovr];' +
+                    '[base][ovr]overlay=format=auto:shortest=1[outv]',
+                    '-map', '[outv]',
+                    '-map', '0:a?',
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',  // Use ultrafast in browser for speed
+                    '-crf', '23',
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'copy',
+                    '-movflags', '+faststart',
+                    '-y',
+                    'output.mp4'
+                ];
+
+                // Execute FFmpeg
+                await ffmpeg.exec(args);
+
+                // Read output file
+                const outputData = await ffmpeg.readFile('output.mp4');
+
+                // Clean up virtual filesystem
+                await ffmpeg.deleteFile('main.mp4');
+                await ffmpeg.deleteFile('overlay.mp4');
+                await ffmpeg.deleteFile('output.mp4');
+
+                // Remove progress listener
+                ffmpeg.off('progress');
+
+                // Convert Uint8Array to ArrayBuffer
+                return outputData.buffer;
+
+            } catch (error) {
+                // Clean up on error
+                try {
+                    await ffmpeg.deleteFile('main.mp4').catch(() => {});
+                    await ffmpeg.deleteFile('overlay.mp4').catch(() => {});
+                    await ffmpeg.deleteFile('output.mp4').catch(() => {});
+                    ffmpeg.off('progress');
+                } catch (cleanupError) {
+                    // Ignore cleanup errors
+                }
+                throw error;
+            }
+        }
+
         // Drag and drop handlers
         uploadSection.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -845,11 +992,25 @@
                 addLog('Using existing metadata - will skip successful downloads', 'info');
             }
 
-            // Determine which items to download (pending or failed)
-            const itemsToDownload = metadataList.map((m, i) => ({ metadata: m, index: i }))
-                .filter(item => item.metadata.status !== 'success' || !item.metadata.files || item.metadata.files.length === 0);
+            // Check media type filters
+            const videosOnly = document.getElementById('videosOnlyCheckbox').checked;
+            const picturesOnly = document.getElementById('picturesOnlyCheckbox').checked;
 
-            addLog(`${itemsToDownload.length} items to download (${metadataList.length - itemsToDownload.length} already completed)`, 'info');
+            // Determine which items to download
+            let itemsToDownload = metadataList.map((m, i) => ({ metadata: m, index: i }));
+
+            // Apply media type filters
+            if (videosOnly) {
+                itemsToDownload = itemsToDownload.filter(item => item.metadata.media_type === 'Video');
+                addLog(`Videos-only mode: ${itemsToDownload.length} videos to process`, 'info');
+            } else if (picturesOnly) {
+                itemsToDownload = itemsToDownload.filter(item => item.metadata.media_type === 'Image');
+                addLog(`Pictures-only mode: ${itemsToDownload.length} pictures to process`, 'info');
+            } else {
+                // Normal mode: skip successfully downloaded items
+                itemsToDownload = itemsToDownload.filter(item => item.metadata.status !== 'success' || !item.metadata.files || item.metadata.files.length === 0);
+                addLog(`${itemsToDownload.length} items to download (${metadataList.length - itemsToDownload.length} already completed)`, 'info');
+            }
 
             if (itemsToDownload.length === 0) {
                 addLog('All memories already downloaded!', 'success');
@@ -939,10 +1100,12 @@
                         // Check if we should merge overlays
                         const mergeOverlays = document.getElementById('mergeOverlaysCheckbox').checked;
                         const isImage = metadata.media_type === 'Image';
+                        const isVideo = metadata.media_type === 'Video';
                         const hasOverlay = files.some(f => f.toLowerCase().includes('-overlay'));
 
-                        // Try to merge if checkbox is checked, it's an image, and has overlay
-                        if (mergeOverlays && isImage && hasOverlay && files.length === 2) {
+                        // Try to merge if checkbox is checked and has overlay
+                        if (mergeOverlays && hasOverlay && files.length === 2) {
+                            if (isImage) {
                             try {
                                 // Get main and overlay files
                                 let mainData = null;
@@ -1013,8 +1176,66 @@
                                 }
                                 addLog(`  Extracted ${files.length} files from ZIP`, 'success');
                             }
+                            } else if (isVideo) {
+                                try {
+                                    addLog(`  Merging video overlay (please wait, this may take a minute)...`, 'info');
+
+                                    // Get main and overlay files
+                                    let mainData = null;
+                                    let overlayData = null;
+
+                                    for (const filename of files) {
+                                        const fileData = await innerZip.files[filename].async('arraybuffer');
+                                        if (filename.toLowerCase().includes('-overlay')) {
+                                            overlayData = fileData;
+                                        } else {
+                                            mainData = fileData;
+                                        }
+                                    }
+
+                                    if (mainData && overlayData) {
+                                        // Merge videos using FFmpeg.wasm
+                                        const mergedData = await mergeVideoOverlay(mainData, overlayData, (progress) => {
+                                            addLog(`    Video merge progress: ${progress}%`, 'info');
+                                        });
+
+                                        const filename = `${fileNum}${extension}`;
+
+                                        // Add to ZIP with original date
+                                        const fileDate = parseSnapchatDate(metadata.date);
+                                        zip.file(filename, mergedData, { date: fileDate });
+                                        metadata.files.push({
+                                            path: filename,
+                                            size: mergedData.byteLength,
+                                            type: 'merged'
+                                        });
+                                        addLog(`  Merged video: ${filename} (${formatBytes(mergedData.byteLength)})`, 'success');
+                                    } else {
+                                        throw new Error('Missing main or overlay video file');
+                                    }
+                                } catch (error) {
+                                    addLog(`  Warning: Failed to merge video overlay (${error.message}), saving separately`, 'info');
+                                    // Fall back to saving separately
+                                    const fileDate = parseSnapchatDate(metadata.date);
+                                    for (const filename of files) {
+                                        let fileData = await innerZip.files[filename].async('arraybuffer');
+                                        const isOverlay = filename.toLowerCase().includes('-overlay');
+                                        const newFilename = isOverlay
+                                            ? `${fileNum}-overlay${extension}`
+                                            : `${fileNum}-main${extension}`;
+
+                                        zip.file(newFilename, fileData, { date: fileDate });
+                                        metadata.files.push({
+                                            path: newFilename,
+                                            size: fileData.byteLength,
+                                            type: isOverlay ? 'overlay' : 'main'
+                                        });
+                                    }
+                                    addLog(`  Extracted ${files.length} video files from ZIP`, 'success');
+                                }
+                            }
                         } else {
-                            // Save files separately (not merging, or is video, or no overlay)
+                            // Save files separately (not merging, no overlay, or single file)
                             const fileDate = parseSnapchatDate(metadata.date);
                             for (const filename of files) {
                                 let fileData = await innerZip.files[filename].async('arraybuffer');

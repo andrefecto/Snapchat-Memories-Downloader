@@ -60,7 +60,9 @@ but are now separate options at the bottom of the list.
 - **Embeds EXIF metadata into images** - GPS coordinates and dates show up in Photos apps
 - **Sets file timestamps to match original capture date**
 - Handles ZIP files with overlays (extracts to `-main` and `-overlay` files)
-- **Optional overlay merging** - Combine overlay on top of main image (images only)
+- **Optional overlay merging** - Combine overlay on top of main content (images and videos)
+  - Images: Fast, instant processing
+  - Videos: Requires FFmpeg, may take 1-5 minutes per video
 - Saves complete `metadata.json` with all information
 - **Resume/Retry support** - Pick up where you left off or retry failed downloads
 - Incremental metadata updates - Track download progress in real-time
@@ -75,7 +77,11 @@ your data never leaves your device!
 
 ### Options
 
-- **Merge overlays**: Combine overlay images with their main images (images only - videos remain separate)
+- **Merge overlays**: Combine overlay content with main files (images and videos)
+  - Images: Fast processing in browser
+  - Videos: Uses FFmpeg.wasm (slower, may take 1-5 minutes per video)
+- **Videos only**: Only download and process videos (useful for re-processing with overlay merging)
+- **Pictures only**: Only download and process pictures (useful for re-processing with overlay merging)
 - **Batch size**: Choose how many files per ZIP (50, 100, 200, or all in one)
   - Batching helps with large collections and allows easier recovery if interrupted
   - Each batch is downloaded as a separate ZIP: `snapchat-memories-batch-1.zip`, `snapchat-memories-batch-2.zip`, etc.
@@ -108,6 +114,30 @@ This will:
 
 - Create a Python virtual environment
 - Install required dependencies (requests)
+
+### Optional: FFmpeg for Video Overlay Merging
+
+To enable video overlay merging, install FFmpeg:
+
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install ffmpeg
+```
+
+**Windows (via Chocolatey):**
+```bash
+choco install ffmpeg
+```
+
+**Windows (manual):**
+- Download from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+
+**Note:** FFmpeg is only required if you want to merge video overlays. The tool works without it (videos will be saved as separate `-main` and `-overlay` files).
 
 ## Usage
 
@@ -166,13 +196,49 @@ python download_memories.py --retry-failed
 
 ### Merge Overlays
 
-To merge overlay files on top of main files (images only):
+To merge overlay files on top of main files (images and videos):
 
 ```bash
 python download_memories.py --merge-overlays
 ```
 
-This will composite the `-overlay` image on top of the `-main` image and save only the merged result. Videos are not merged and will remain as separate files.
+This will composite the `-overlay` content on top of the `-main` content and save only the merged result.
+
+**Requirements:**
+- Images: No additional requirements (uses Pillow)
+- Videos: Requires FFmpeg (see installation instructions above)
+
+**Performance:**
+- Images: Fast, instant processing
+- Videos: May take 1-5 minutes per video depending on length and resolution
+
+If FFmpeg is not installed, videos will be saved as separate `-main` and `-overlay` files.
+
+### Re-process Videos Only
+
+If you already downloaded your memories before video merging was available, you can re-process only the videos:
+
+```bash
+python download_memories.py --videos-only --merge-overlays
+```
+
+This will:
+- Skip all pictures (already downloaded)
+- Re-download and process only videos
+- Merge video overlays if `--merge-overlays` is specified
+
+### Re-process Pictures Only
+
+Similarly, to re-process only pictures:
+
+```bash
+python download_memories.py --pictures-only --merge-overlays
+```
+
+This will:
+- Skip all videos (already downloaded)
+- Re-download and process only pictures
+- Merge picture overlays if `--merge-overlays` is specified
 
 ### View All Options
 

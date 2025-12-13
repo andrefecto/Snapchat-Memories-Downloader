@@ -14,6 +14,7 @@ from html.parser import HTMLParser
 from datetime import datetime
 import zipfile
 import io
+import subprocess
 
 try:
     import requests
@@ -35,6 +36,21 @@ except ImportError:
     print("Warning: piexif not found. EXIF metadata writing will be disabled.")
     print("Install with: pip install -r requirements.txt")
     piexif = None
+
+# Check if ffmpeg is available for video overlay merging
+try:
+    ffmpeg_available = subprocess.run(
+        ['ffmpeg', '-version'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5
+    ).returncode == 0
+except (FileNotFoundError, subprocess.TimeoutExpired):
+    ffmpeg_available = False
+
+if not ffmpeg_available:
+    print("Warning: ffmpeg not found. Video overlay merging will be disabled.")
+    print("Install: brew install ffmpeg (macOS) or apt-get install ffmpeg (Linux)")
 
 
 class MemoriesParser(HTMLParser):
@@ -228,6 +244,76 @@ def merge_image_overlay(main_data: bytes, overlay_data: bytes) -> bytes:
     return output.getvalue()
 
 
+def merge_video_overlay(
+    main_path: Path,
+    overlay_path: Path,
+    output_path: Path
+) -> bool:
+    """
+    Merge overlay video on top of main video using FFmpeg.
+
+    Args:
+        main_path: Path to main video file (MP4)
+        overlay_path: Path to overlay video file (MP4)
+        output_path: Path where merged video should be saved
+
+    Returns:
+        True if merge successful, False otherwise
+    """
+    if not ffmpeg_available:
+        raise RuntimeError("FFmpeg is not available")
+
+    try:
+        # Build FFmpeg command
+        cmd = [
+            'ffmpeg',
+            '-i', str(main_path),
+            '-i', str(overlay_path),
+            '-filter_complex',
+            (
+                '[0:v]fps=30,setsar=1[base];'
+                '[1:v]scale=w=iw(base):h=ih(base),fps=30,setsar=1,'
+                'loop=loop=-1:size=32767:start=0,setpts=N/FRAME_RATE/TB[ovr];'
+                '[base][ovr]overlay=format=auto:shortest=1[outv]'
+            ),
+            '-map', '[outv]',
+            '-map', '0:a?',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'copy',
+            '-movflags', '+faststart',
+            '-y',
+            str(output_path)
+        ]
+
+        # Run FFmpeg with error capture
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,  # 5 minute timeout for long videos
+            check=False
+        )
+
+        # Check if output file was created and has reasonable size
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
+            return True
+        else:
+            # Log error for debugging
+            error_msg = result.stderr.decode('utf-8', errors='ignore')
+            print(f"    FFmpeg error: {error_msg[-500:]}")  # Last 500 chars
+            return False
+
+    except subprocess.TimeoutExpired:
+        print(f"    FFmpeg timeout: video processing took too long")
+        return False
+    except Exception as e:
+        print(f"    FFmpeg exception: {e}")
+        return False
+
+
 def download_and_extract(
     url: str,
     base_path: Path,
@@ -275,11 +361,13 @@ def download_and_extract(
                     main_file = file_data
                     extracted_files['main'] = file_data
 
+            # Check media type
+            is_image = extension.lower() in ['.jpg', '.jpeg', '.png']
+            is_video = extension.lower() in ['.mp4', '.mov', '.avi']
+            merge_attempted = False
+
             # If merge_overlays is True and we have both files
             if merge_overlays and has_overlay and main_file and overlay_file:
-                # Only merge images (check extension)
-                is_image = extension.lower() in ['.jpg', '.jpeg', '.png']
-
                 if is_image and Image is not None:
                     try:
                         # Merge the images
@@ -299,14 +387,59 @@ def download_and_extract(
                             'size': len(merged_data),
                             'type': 'merged'
                         })
+                        merge_attempted = True
                     except Exception as e:
-                        print(f"    Warning: Failed to merge overlay: {e}")
+                        print(f"    Warning: Failed to merge image overlay: {e}")
                         print("    Saving separate files instead...")
                         # Fall back to saving separately
                         merge_overlays = False
 
+                elif is_video and ffmpeg_available:
+                    try:
+                        # Create temporary files for main and overlay
+                        temp_main = base_path / f"{file_num}-temp-main{extension}"
+                        temp_overlay = base_path / f"{file_num}-temp-overlay{extension}"
+                        output_filename = f"{file_num}{extension}"
+                        output_path = base_path / output_filename
+
+                        # Write temporary files
+                        with open(temp_main, 'wb') as f:
+                            f.write(main_file)
+                        with open(temp_overlay, 'wb') as f:
+                            f.write(overlay_file)
+
+                        # Merge videos
+                        print(f"    Merging video overlay (this may take a while)...")
+                        success = merge_video_overlay(temp_main, temp_overlay, output_path)
+
+                        if success:
+                            files_saved.append({
+                                'path': output_filename,
+                                'size': output_path.stat().st_size,
+                                'type': 'merged'
+                            })
+                            print(f"    Merged video: {output_filename}")
+                            merge_attempted = True
+                        else:
+                            print("    Warning: Video merge failed, saving separate files instead...")
+                            merge_overlays = False
+
+                        # Clean up temp files
+                        temp_main.unlink(missing_ok=True)
+                        temp_overlay.unlink(missing_ok=True)
+
+                    except Exception as e:
+                        print(f"    Warning: Failed to merge video overlay: {e}")
+                        print("    Saving separate files instead...")
+                        # Clean up temp files on error
+                        if 'temp_main' in locals():
+                            temp_main.unlink(missing_ok=True)
+                        if 'temp_overlay' in locals():
+                            temp_overlay.unlink(missing_ok=True)
+                        merge_overlays = False
+
             # If not merging or merge failed, save separately
-            if not merge_overlays or not has_overlay or not is_image or Image is None:
+            if not merge_attempted:
                 for file_type, file_data in extracted_files.items():
                     if file_type == 'overlay':
                         output_filename = f"{file_num}-overlay{extension}"
@@ -433,7 +566,9 @@ def download_all_memories(
     output_dir: str = 'memories',
     resume: bool = False,
     retry_failed: bool = False,
-    merge_overlays: bool = False
+    merge_overlays: bool = False,
+    videos_only: bool = False,
+    pictures_only: bool = False
 ) -> None:
     """Download all memories with sequential naming and metadata preservation."""
 
@@ -452,7 +587,19 @@ def download_all_memories(
     metadata_list = initialize_metadata(memories, output_path)
 
     # Determine which items to download
-    if resume:
+    if videos_only:
+        items_to_download = [
+            (i, m) for i, m in enumerate(metadata_list)
+            if m.get('media_type') == 'Video'
+        ]
+        print(f"\nProcessing videos only: {len(items_to_download)} videos to download")
+    elif pictures_only:
+        items_to_download = [
+            (i, m) for i, m in enumerate(metadata_list)
+            if m.get('media_type') == 'Image'
+        ]
+        print(f"\nProcessing pictures only: {len(items_to_download)} pictures to download")
+    elif resume:
         items_to_download = [
             (i, m) for i, m in enumerate(metadata_list)
             if m.get('status') in ['pending', 'in_progress', 'failed']
@@ -486,8 +633,8 @@ def download_all_memories(
         print(f"  Type: {metadata['media_type']}")
         print(f"  Location: {metadata['latitude']}, {metadata['longitude']}")
 
-        # Skip if already successful
-        if metadata.get('status') == 'success' and metadata.get('files'):
+        # Skip if already successful (unless videos_only or pictures_only mode)
+        if metadata.get('status') == 'success' and metadata.get('files') and not videos_only and not pictures_only:
             print("  Already downloaded, skipping...")
             continue
 
@@ -594,7 +741,17 @@ if __name__ == '__main__':
     parser.add_argument(
         '--merge-overlays',
         action='store_true',
-        help='Merge overlay images on top of main images (images only)'
+        help='Merge overlay images and videos on top of main content (requires FFmpeg for videos)'
+    )
+    parser.add_argument(
+        '--videos-only',
+        action='store_true',
+        help='Only download and process videos (skip pictures). Useful for re-processing existing downloads.'
+    )
+    parser.add_argument(
+        '--pictures-only',
+        action='store_true',
+        help='Only download and process pictures (skip videos). Useful for re-processing existing downloads.'
     )
 
     args = parser.parse_args()
@@ -618,6 +775,8 @@ if __name__ == '__main__':
     retry_failed_mode = args.retry_failed
     test_mode = args.test
     merge_overlays_mode = args.merge_overlays
+    videos_only_mode = args.videos_only
+    pictures_only_mode = args.pictures_only
 
     # Optional: limit number of downloads for testing
     # Pass --test to download only first 3 files
@@ -693,5 +852,7 @@ if __name__ == '__main__':
             HTML_FILE,
             resume=resume_mode,
             retry_failed=retry_failed_mode,
-            merge_overlays=merge_overlays_mode
+            merge_overlays=merge_overlays_mode,
+            videos_only=videos_only_mode,
+            pictures_only=pictures_only_mode
         )
