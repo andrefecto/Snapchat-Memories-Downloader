@@ -67,7 +67,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
   <!-- FFmpeg.wasm for video processing -->
-  <script src="./ffmpeg/ffmpeg.js"></script>
+  <script src="ffmpeg/ffmpeg.js"></script>
   <style>
     * {
       margin: 0;
@@ -709,6 +709,16 @@
   </div>
 
   <script>
+    // Global resource load error listener for debugging 404s
+    window.addEventListener('error', function (e) {
+      try {
+        const src = e?.target?.src || e?.target?.href || null;
+        if (src) console.error('Resource load failed:', src, e);
+      } catch (err) {
+        console.error('Error in resource load listener', err);
+      }
+    }, true);
+
     const fileInput = document.getElementById("fileInput");
     const metadataInput = document.getElementById("metadataInput");
     const uploadSection = document.getElementById("uploadSection");
@@ -747,6 +757,12 @@
         wasmURL: new URL('./ffmpeg/ffmpeg-core.wasm', window.location).href,
         worker: false
       });
+      addLog(`FFmpeg coreURL: ${new URL('./ffmpeg/ffmpeg-core.js', window.location).href}`, 'info');
+      addLog(`FFmpeg wasmURL: ${new URL('./ffmpeg/ffmpeg-core.wasm', window.location).href}`, 'info');
+      // Log FFmpeg backend messages for debugging
+      ffmpegInstance.on('log', (m) => {
+        try { addLog(`FFmpeg log: ${JSON.stringify(m)}`, 'info'); } catch(e) { addLog(`FFmpeg log: ${m}`, 'info'); }
+      });
 
       ffmpegLoaded = true;
       addLog('FFmpeg loaded successfully (local, no workers)', 'success');
@@ -763,6 +779,7 @@
         const dateStrClean = dateStr.replace(" UTC", "");
         return new Date(dateStrClean + "Z"); // Add Z to indicate UTC
       } catch (error) {
+        console.error("mergeVideoOverlay error:", error);
         console.warn("Could not parse date:", dateStr, error);
         return new Date(); // Fallback to current date
       }
@@ -783,6 +800,39 @@
         [minutes, 1],
         [Math.round(seconds * 100), 100],
       ];
+    }
+
+    // Detect common file extension from file bytes (Uint8Array)
+    function detectFileExtension(uint8array) {
+      if (!uint8array || uint8array.length < 12) return null;
+      // PNG
+      if (uint8array[0] === 0x89 && uint8array[1] === 0x50 && uint8array[2] === 0x4e && uint8array[3] === 0x47) return '.png';
+      // JPEG
+      if (uint8array[0] === 0xff && uint8array[1] === 0xd8 && uint8array[2] === 0xff) return '.jpg';
+      // WebP (RIFF....WEBP)
+      if (
+        uint8array[0] === 0x52 &&
+        uint8array[1] === 0x49 &&
+        uint8array[2] === 0x46 &&
+        uint8array[3] === 0x46 &&
+        uint8array[8] === 0x57 &&
+        uint8array[9] === 0x45 &&
+        uint8array[10] === 0x42 &&
+        uint8array[11] === 0x50
+      )
+        return '.webp';
+      // GIF
+      if (uint8array[0] === 0x47 && uint8array[1] === 0x49 && uint8array[2] === 0x46) return '.gif';
+      // MP4 (ftyp at bytes 4-7)
+      if (
+        uint8array.length >= 12 &&
+        uint8array[4] === 0x66 &&
+        uint8array[5] === 0x74 &&
+        uint8array[6] === 0x79 &&
+        uint8array[7] === 0x70
+      )
+        return '.mp4';
+      return null;
     }
 
     /**
@@ -983,11 +1033,12 @@
         throw new Error("FFmpeg.wasm not available");
       }
 
+      let overlayFilename;
       try {
         // Write input files to FFmpeg virtual filesystem
         await ffmpeg.writeFile("main.mp4", new Uint8Array(mainData));
 
-        const overlayFilename = overlayIsImage ? `overlay${overlayExt}` : 'overlay.mp4';
+        overlayFilename = overlayIsImage ? `overlay${overlayExt}` : 'overlay.mp4';
         await ffmpeg.writeFile(overlayFilename, new Uint8Array(overlayData));
 
         // Set up progress logging
@@ -998,10 +1049,54 @@
           }
         });
 
+        // Probe main video to get dimensions to properly scale overlay
+        let mainWidth = null;
+        let mainHeight = null;
+        try {
+          const probeRaw = await ffmpeg.ffprobe([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            "main.mp4",
+          ]);
+          try {
+            const probeJson = JSON.parse(probeRaw);
+            if (probeJson.streams && probeJson.streams[0]) {
+              mainWidth = probeJson.streams[0].width;
+              mainHeight = probeJson.streams[0].height;
+            }
+          } catch (e) {
+            // If parse fails, try regex parse fallback
+            try {
+              const matchW = probeRaw.match(/"width"\s*:\s*(\d+)/);
+              const matchH = probeRaw.match(/"height"\s*:\s*(\d+)/);
+              if (matchW) mainWidth = parseInt(matchW[1], 10);
+              if (matchH) mainHeight = parseInt(matchH[1], 10);
+            } catch (e2) {
+              // Ignore
+            }
+          }
+        } catch (probeError) {
+          addLog(`    FFprobe failed: ${(probeError && probeError.message) || String(probeError)}`, "info");
+          console.warn('FFprobe failed:', probeError);
+        }
+
+        if (mainWidth && mainHeight) {
+          addLog(`    main video dimensions: ${mainWidth}x${mainHeight}`, 'info');
+        }
+
         // FFmpeg command arguments — handle image overlay vs video overlay
         let args;
         if (overlayIsImage) {
           // overlay is an image (png/jpg/etc.)
+          let scaleStr = '';
+          if (mainWidth && mainHeight) scaleStr = `${mainWidth}:${mainHeight}`;
+          else scaleStr = 'iw:ih';
           args = [
             "-i",
             "main.mp4",
@@ -1010,7 +1105,8 @@
             "-i",
             overlayFilename,
             "-filter_complex",
-            "[1:v]scale=iw:ih,setsar=1[ovr];[0:v][ovr]overlay=format=auto:shortest=1[outv]",
+            // Scale overlay to main video and center using explicit dimensions
+            `[1:v]scale=${scaleStr}[ovr];[0:v][ovr]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:format=auto:shortest=1[outv]`,
             "-map",
             "[outv]",
             "-map",
@@ -1061,15 +1157,16 @@
         }
 
         // Execute FFmpeg
+        addLog(`Executing FFmpeg with overlayIsImage=${overlayIsImage}, overlayFilename=${overlayFilename}`, 'info');
         await ffmpeg.exec(args);
 
         // Read output file
         const outputData = await ffmpeg.readFile("output.mp4");
 
         // Clean up virtual filesystem
-        await ffmpeg.deleteFile("main.mp4");
-        await ffmpeg.deleteFile("overlay.mp4");
-        await ffmpeg.deleteFile("output.mp4");
+        await ffmpeg.deleteFile("main.mp4").catch(() => {});
+        if (overlayFilename) await ffmpeg.deleteFile(overlayFilename).catch(() => {});
+        await ffmpeg.deleteFile("output.mp4").catch(() => {});
 
         // Remove progress listener
         ffmpeg.off("progress");
@@ -1080,13 +1177,22 @@
         // Clean up on error
         try {
           await ffmpeg.deleteFile("main.mp4").catch(() => { });
-          await ffmpeg.deleteFile("overlay.mp4").catch(() => { });
+          if (overlayFilename) await ffmpeg.deleteFile(overlayFilename).catch(() => { });
           await ffmpeg.deleteFile("output.mp4").catch(() => { });
           ffmpeg.off("progress");
         } catch (cleanupError) {
           // Ignore cleanup errors
         }
-        throw error;
+        // Normalize and wrap the error so downstream handlers can log details
+        let errorMsg = "";
+        try {
+          errorMsg = error && (error.message || String(error) || JSON.stringify(error));
+        } catch (e) {
+          errorMsg = "Unknown error";
+        }
+        const enhanced = new Error(`FFmpeg merge failed: ${errorMsg}`);
+        if (error && error.stack) enhanced.stack = error.stack;
+        throw enhanced;
       }
     }
 
@@ -1410,8 +1516,13 @@
         metadata.status = "in_progress";
 
         try {
+          addLog(`    Fetching: ${metadata.url}`, "info");
+          console.log("Fetching:", metadata.url);
           const response = await fetch(metadata.url);
           if (!response.ok) {
+            const bodyText = await response.text().catch(()=>"<no body>");
+            addLog(`    HTTP error ${response.status} while fetching ${metadata.url}`, "error");
+            console.error(`HTTP ${response.status} fetching ${metadata.url}:`, bodyText);
             throw new Error(`HTTP ${response.status}`);
           }
 
@@ -1472,7 +1583,7 @@
             const isImage = metadata.media_type === "Image";
             const isVideo = metadata.media_type === "Video";
             const hasOverlay = files.some((f) =>
-              f.toLowerCase().includes("-overlay")
+              f.toLowerCase().includes("overlay")
             );
 
             // Try to merge if checkbox is checked and has overlay
@@ -1487,7 +1598,7 @@
                     const fileData = await innerZip.files[filename].async(
                       "arraybuffer"
                     );
-                    if (filename.toLowerCase().includes("-overlay")) {
+                    if (filename.toLowerCase().includes("overlay")) {
                       overlayData = fileData;
                     } else {
                       mainData = fileData;
@@ -1529,10 +1640,29 @@
                     throw new Error("Missing main or overlay file");
                   }
                 } catch (error) {
+                  // Normalize error
+                  let errorMsg = "";
+                  try {
+                    errorMsg = error && (error.message || String(error) || JSON.stringify(error));
+                  } catch (e) {
+                    errorMsg = "Unknown error";
+                  }
                   addLog(
-                    `  Warning: Failed to merge overlay (${error.message}), saving separately`,
+                    `  Warning: Failed to merge overlay (${errorMsg}), saving separately`,
                     "info"
                   );
+                  console.error("Failed to merge overlay", error);
+                  // Debug details
+                  try {
+                    addLog(`    overlay name: ${overlayName || 'unknown'}`, "info");
+                    const overlayBytes = overlayData ? new Uint8Array(overlayData).length : 0;
+                    addLog(`    overlay size: ${overlayBytes} bytes`, "info");
+                    const detected = overlayData ? detectFileExtension(new Uint8Array(overlayData)) : null;
+                    addLog(`    overlay detected ext: ${detected || 'unknown'}`, "info");
+                  } catch (debugError) {
+                    addLog(`    Debug info failed: ${(debugError && debugError.message) || String(debugError)}`, "info");
+                  }
+                  if (error && error.stack) addLog(`    Stack: ${error.stack}`, "info");
                   // Fall back to saving separately
                   const fileDate = parseSnapchatDate(metadata.date);
                   for (const filename of files) {
@@ -1541,10 +1671,16 @@
                     );
                     const isOverlay = filename
                       .toLowerCase()
-                      .includes("-overlay");
+                      .includes("overlay");
+                    // Preserve original extension if present in inner filename
+                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
+                    if (!origExt) {
+                      const detected = detectFileExtension(new Uint8Array(fileData));
+                      origExt = detected || extension;
+                    }
                     const newFilename = isOverlay
-                      ? `${fileNum}-overlay${extension}`
-                      : `${fileNum}-main${extension}`;
+                      ? `${fileNum}-overlay${origExt}`
+                      : `${fileNum}-main${origExt}`;
 
                     // Add EXIF metadata to images
                     if (metadata.media_type === "Image") {
@@ -1557,6 +1693,7 @@
                     }
 
                     zip.file(newFilename, fileData, { date: fileDate });
+                    addLog(`    Saved extracted file: ${newFilename} (${formatBytes(fileData.byteLength)})`, "info");
                     metadata.files.push({
                       path: newFilename,
                       size: fileData.byteLength,
@@ -1585,7 +1722,7 @@
                     const fileData = await innerZip.files[filename].async(
                       "arraybuffer"
                     );
-                    if (filename.toLowerCase().includes("-overlay")) {
+                    if (filename.toLowerCase().includes("overlay")) {
                       overlayData = fileData;
                       overlayName = filename;
                     } else {
@@ -1596,9 +1733,13 @@
 
                   if (mainData && overlayData) {
                     // Determine overlay extension and whether it's an image
-                    const overlayExt = overlayName && overlayName.includes('.')
+                    let overlayExt = overlayName && overlayName.includes('.')
                       ? overlayName.substring(overlayName.lastIndexOf('.'))
-                      : '.mp4';
+                      : null;
+                    // Try to detect from data if no extension or ambiguous
+                    const detectedOverlayExt = detectFileExtension(new Uint8Array(overlayData));
+                    if (detectedOverlayExt) overlayExt = detectedOverlayExt;
+                    if (!overlayExt) overlayExt = '.mp4';
                     const overlayExtNoDot = overlayExt.replace('.', '').toLowerCase();
                     const overlayIsImage = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(overlayExtNoDot);
 
@@ -1636,10 +1777,43 @@
                     throw new Error("Missing main or overlay video file");
                   }
                 } catch (error) {
+                  // Normalize the error into a readable message
+                  let errorMsg = "";
+                  try {
+                    errorMsg = error && (error.message || String(error) || JSON.stringify(error));
+                  } catch (e) {
+                    errorMsg = "Unknown error";
+                  }
+
                   addLog(
-                    `  Warning: Failed to merge video overlay (${error.message}), saving separately`,
+                    `  Warning: Failed to merge video overlay (${errorMsg}), saving separately`,
                     "info"
                   );
+                  console.error("Failed to merge video overlay", error);
+
+                  // Additional debug information
+                  try {
+                    const mainBytes = mainData ? new Uint8Array(mainData).length : 0;
+                    const overlayBytes = overlayData ? new Uint8Array(overlayData).length : 0;
+                    addLog(`    main size: ${mainBytes} bytes`, "info");
+                    addLog(`    overlay size: ${overlayBytes} bytes`, "info");
+
+                    // Derive overlay ext and detection info for debugging
+                    let overlayDetectedExt = overlayName && overlayName.includes('.') ? overlayName.substring(overlayName.lastIndexOf('.')) : null;
+                    const detectedOverlayFromBytes = overlayData ? detectFileExtension(new Uint8Array(overlayData)) : null;
+                    if (detectedOverlayFromBytes) overlayDetectedExt = detectedOverlayFromBytes;
+                    overlayDetectedExt = overlayDetectedExt || 'unknown';
+                    const overlayIsImageDetected = ['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes((overlayDetectedExt || '').replace('.', '').toLowerCase());
+                    addLog(`    overlay name: ${overlayName || 'unknown'}`, "info");
+                    addLog(`    overlay detected ext: ${overlayDetectedExt} (image? ${overlayIsImageDetected})`, "info");
+                  } catch (debugError) {
+                    addLog(`    Debug info collection failed: ${(debugError && debugError.message) || String(debugError)}`, "info");
+                  }
+
+                  // Dump stack if available
+                  if (error && error.stack) {
+                    addLog(`    Stack: ${error.stack}`, "info");
+                  }
                   // Fall back to saving separately
                   const fileDate = parseSnapchatDate(metadata.date);
                   for (const filename of files) {
@@ -1648,10 +1822,15 @@
                     );
                     const isOverlay = filename
                       .toLowerCase()
-                      .includes("-overlay");
+                      .includes("overlay");
+                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
+                    if (!origExt) {
+                      const detected = detectFileExtension(new Uint8Array(fileData));
+                      origExt = detected || extension;
+                    }
                     const newFilename = isOverlay
-                      ? `${fileNum}-overlay${extension}`
-                      : `${fileNum}-main${extension}`;
+                      ? `${fileNum}-overlay${origExt}`
+                      : `${fileNum}-main${origExt}`;
 
                     zip.file(newFilename, fileData, { date: fileDate });
                     metadata.files.push({
@@ -1673,9 +1852,13 @@
                     let fileData = await innerZip.files[filename].async(
                       "arraybuffer"
                     );
-                    const isOverlay = filename.toLowerCase().includes("-overlay");
+                    const isOverlay = filename.toLowerCase().includes("overlay");
                     // Preserve original extension from the inner filename if present
-                    const origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : extension;
+                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
+                    if (!origExt) {
+                      const detected = detectFileExtension(new Uint8Array(fileData));
+                      origExt = detected || extension;
+                    }
                     const newFilename = isOverlay
                       ? `${fileNum}-overlay${origExt}`
                       : `${fileNum}-main${origExt}`;
