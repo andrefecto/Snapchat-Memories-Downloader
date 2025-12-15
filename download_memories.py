@@ -324,12 +324,14 @@ def download_and_extract(
     merge_overlays: bool = False,
     date_str: str = 'Unknown',
     latitude: str = 'Unknown',
-    longitude: str = 'Unknown'
+    longitude: str = 'Unknown',
+    overlays_only: bool = False
 ) -> list:
     """
     Download a file from URL. If it's a ZIP with overlay, extract and optionally merge.
     Adds EXIF metadata (GPS and date) to images.
     Returns list of dicts with file info: [{'path': path, 'size': size, 'type': 'main'/'overlay'/'merged'}]
+    Returns empty list if overlays_only=True and file has no overlay.
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
@@ -363,6 +365,11 @@ def download_and_extract(
 
             # Check if we have both main and overlay
             has_overlay = any('-overlay' in f.lower() for f in filenames)
+
+            # If overlays_only mode is enabled and this file has no overlay, skip it
+            if overlays_only and not has_overlay:
+                return []
+
             main_file = None
             overlay_file = None
 
@@ -503,7 +510,12 @@ def download_and_extract(
                     })
 
     else:
-        # Not a ZIP - save as regular file
+        # Not a ZIP - no overlay present
+        # If overlays_only mode is enabled, skip non-ZIP files
+        if overlays_only:
+            return []
+
+        # Save as regular file
         output_filename = f"{file_num}{extension}"
         output_path = base_path / output_filename
 
@@ -723,7 +735,8 @@ def download_all_memories(
     retry_failed: bool = False,
     merge_overlays: bool = False,
     videos_only: bool = False,
-    pictures_only: bool = False
+    pictures_only: bool = False,
+    overlays_only: bool = False
 ) -> None:
     """Download all memories with sequential naming and metadata preservation."""
 
@@ -801,8 +814,16 @@ def download_all_memories(
             # Download and extract file(s)
             files_saved = download_and_extract(
                 memory['url'], output_path, file_num, extension, merge_overlays,
-                metadata['date'], metadata['latitude'], metadata['longitude']
+                metadata['date'], metadata['latitude'], metadata['longitude'],
+                overlays_only
             )
+
+            # Check if file was skipped due to overlays_only mode
+            if len(files_saved) == 0:
+                print("  Skipped: No overlay detected (overlays-only mode)")
+                metadata['status'] = 'skipped'
+                metadata['skip_reason'] = 'no_overlay'
+                continue
 
             # Display what was downloaded
             if len(files_saved) > 1:
@@ -909,6 +930,11 @@ if __name__ == '__main__':
         help='Only download and process pictures (skip videos). Useful for re-processing existing downloads.'
     )
     parser.add_argument(
+        '--overlays-only',
+        action='store_true',
+        help='Only keep memories that have overlays (skip memories without -main/-overlay pairs)'
+    )
+    parser.add_argument(
         '--merge-existing',
         type=str,
         metavar='FOLDER',
@@ -944,6 +970,7 @@ if __name__ == '__main__':
     merge_overlays_mode = args.merge_overlays
     videos_only_mode = args.videos_only
     pictures_only_mode = args.pictures_only
+    overlays_only_mode = args.overlays_only
 
     # Optional: limit number of downloads for testing
     # Pass --test to download only first 3 files
@@ -977,7 +1004,8 @@ if __name__ == '__main__':
             try:
                 files_saved = download_and_extract(
                     memory['url'], output_path, file_num, extension, merge_overlays_mode,
-                    metadata['date'], metadata['latitude'], metadata['longitude']
+                    metadata['date'], metadata['latitude'], metadata['longitude'],
+                    False  # overlays_only not used in test mode
                 )
 
                 if len(files_saved) > 1:
@@ -1021,5 +1049,6 @@ if __name__ == '__main__':
             retry_failed=retry_failed_mode,
             merge_overlays=merge_overlays_mode,
             videos_only=videos_only_mode,
-            pictures_only=pictures_only_mode
+            pictures_only=pictures_only_mode,
+            overlays_only=overlays_only_mode
         )
