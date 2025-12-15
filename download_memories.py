@@ -437,6 +437,7 @@ def download_and_extract(
                             print(f"    Merged video: {output_filename}")
 
                             # Set file timestamp to match original Snapchat date
+                            timestamp = parse_date_to_timestamp(date_str)
                             set_file_timestamp(output_path, timestamp)
 
                             # Delete any previously saved -main/-overlay files
@@ -487,6 +488,7 @@ def download_and_extract(
                         f.write(file_data)
 
                     # Set file timestamp to match original Snapchat date
+                    timestamp = parse_date_to_timestamp(date_str)
                     set_file_timestamp(output_path, timestamp)
 
                     files_saved.append({
@@ -592,6 +594,125 @@ def save_metadata(metadata_list: list, output_path: Path) -> None:
     metadata_file = output_path / 'metadata.json'
     with open(metadata_file, 'w', encoding='utf-8') as f:
         json.dump(metadata_list, f, indent=2, ensure_ascii=False)
+
+
+def merge_existing_files(folder_path: str) -> None:
+    """
+    Scan a folder for -main/-overlay file pairs and merge them.
+    Does NOT delete the original -main/-overlay files.
+
+    Args:
+        folder_path: Path to folder containing -main/-overlay files
+    """
+    folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        print(f"Error: {folder_path} is not a valid directory!")
+        return
+
+    print(f"Scanning {folder_path} for -main/-overlay pairs...")
+    print("=" * 60)
+
+    # Find all -main files
+    main_files = list(folder.glob('*-main.*'))
+
+    if not main_files:
+        print("No -main files found in the specified folder!")
+        return
+
+    print(f"Found {len(main_files)} -main files")
+
+    merged_count = 0
+    skipped_count = 0
+    error_count = 0
+
+    for main_file in main_files:
+        # Extract base filename and extension
+        # e.g., "05-main.mp4" -> "05" and ".mp4"
+        filename = main_file.name
+        if '-main' not in filename:
+            continue
+
+        base_name = filename.replace('-main', '')
+        extension = main_file.suffix
+        file_num = filename.split('-main')[0]
+
+        # Look for corresponding overlay file
+        overlay_file = folder / filename.replace('-main', '-overlay')
+
+        if not overlay_file.exists():
+            print(f"\n[SKIP] {filename}")
+            print(f"  No matching overlay file found")
+            skipped_count += 1
+            continue
+
+        # Determine output filename (without -main suffix)
+        output_file = folder / base_name
+
+        print(f"\n[{merged_count + skipped_count + error_count + 1}/{len(main_files)}] Merging: {filename}")
+        print(f"  Main: {main_file.name} ({main_file.stat().st_size:,} bytes)")
+        print(f"  Overlay: {overlay_file.name} ({overlay_file.stat().st_size:,} bytes)")
+
+        try:
+            # Check file type
+            is_video = extension.lower() in ['.mp4', '.mov', '.avi']
+            is_image = extension.lower() in ['.jpg', '.jpeg', '.png']
+
+            if is_video:
+                if not ffmpeg_available:
+                    print(f"  ERROR: FFmpeg not available for video merging")
+                    error_count += 1
+                    continue
+
+                print(f"  Merging videos (this may take a while)...")
+                success = merge_video_overlay(main_file, overlay_file, output_file)
+
+                if success:
+                    print(f"  Success: {base_name} ({output_file.stat().st_size:,} bytes)")
+                    # Copy timestamp from main file to merged file
+                    main_stat = main_file.stat()
+                    os.utime(output_file, (main_stat.st_atime, main_stat.st_mtime))
+                    merged_count += 1
+                else:
+                    print(f"  ERROR: Video merge failed")
+                    error_count += 1
+
+            elif is_image:
+                if Image is None:
+                    print(f"  ERROR: Pillow not available for image merging")
+                    error_count += 1
+                    continue
+
+                # Read both files
+                with open(main_file, 'rb') as f:
+                    main_data = f.read()
+                with open(overlay_file, 'rb') as f:
+                    overlay_data = f.read()
+
+                # Merge images
+                merged_data = merge_image_overlay(main_data, overlay_data)
+
+                # Save merged image
+                with open(output_file, 'wb') as f:
+                    f.write(merged_data)
+
+                print(f"  Success: {base_name} ({len(merged_data):,} bytes)")
+
+                # Copy timestamp from main file to merged file
+                main_stat = main_file.stat()
+                os.utime(output_file, (main_stat.st_atime, main_stat.st_mtime))
+                merged_count += 1
+            else:
+                print(f"  ERROR: Unknown file type {extension}")
+                error_count += 1
+
+        except Exception as e:
+            print(f"  ERROR: {str(e)}")
+            error_count += 1
+
+    print("\n" + "=" * 60)
+    print("Merge complete!")
+    print(f"Summary: {merged_count} merged, {skipped_count} skipped, {error_count} errors")
+    print(f"\nNote: Original -main and -overlay files were NOT deleted")
 
 
 def download_all_memories(
@@ -786,8 +907,20 @@ if __name__ == '__main__':
         action='store_true',
         help='Only download and process pictures (skip videos). Useful for re-processing existing downloads.'
     )
+    parser.add_argument(
+        '--merge-existing',
+        type=str,
+        metavar='FOLDER',
+        help='Merge existing -main/-overlay file pairs in the specified folder (does NOT delete originals)'
+    )
 
     args = parser.parse_args()
+
+    # Handle --merge-existing mode (separate from normal download mode)
+    if args.merge_existing:
+        merge_existing_files(args.merge_existing)
+        sys.exit(0)
+
     html_path = args.html_file
 
     # If path is a directory, look for memories_history.html inside it
