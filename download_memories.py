@@ -43,7 +43,8 @@ try:
         ['ffmpeg', '-version'],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=5
+        timeout=5,
+        check=False
     ).returncode == 0
 except (FileNotFoundError, subprocess.TimeoutExpired):
     ffmpeg_available = False
@@ -130,12 +131,11 @@ def is_zip_file(content: bytes) -> bool:
     return content[:2] == b'PK'
 
 
-def decimal_to_dms(decimal: float, is_latitude: bool) -> tuple:
+def decimal_to_dms(decimal: float) -> tuple:
     """
     Convert decimal coordinates to degrees, minutes, seconds format for EXIF.
     Returns: ((degrees, 1), (minutes, 1), (seconds, 100))
     """
-    is_positive = decimal >= 0
     decimal = abs(decimal)
 
     degrees = int(decimal)
@@ -192,12 +192,12 @@ def add_exif_metadata(
         # Add GPS coordinates
         if lat is not None and lon is not None:
             # GPS latitude
-            lat_dms = decimal_to_dms(lat, True)
+            lat_dms = decimal_to_dms(lat)
             exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = lat_dms
             exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = b'N' if lat >= 0 else b'S'
 
             # GPS longitude
-            lon_dms = decimal_to_dms(lon, False)
+            lon_dms = decimal_to_dms(lon)
             exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = lon_dms
             exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = b'E' if lon >= 0 else b'W'
 
@@ -309,7 +309,7 @@ def merge_video_overlay(
             return False
 
     except subprocess.TimeoutExpired:
-        print(f"    FFmpeg timeout: video processing took too long")
+        print("    FFmpeg timeout: video processing took too long")
         return False
     except Exception as e:
         print(f"    FFmpeg exception: {e}")
@@ -351,9 +351,9 @@ def download_and_extract(
         # Check for MP4 magic bytes (ftyp box)
         # Valid MP4 files typically have 'ftyp' at bytes 4-8
         if content[4:8] not in [b'ftyp', b'mdat', b'moov', b'wide']:
-            print(f"    WARNING: File may not be a valid video (invalid MP4 signature)")
+            print("    WARNING: File may not be a valid video (invalid MP4 signature)")
             print(f"    First 20 bytes: {content[:20]}")
-            print(f"    This might be an HTML error page or expired download link")
+            print("    This might be an HTML error page or expired download link")
 
     # Check if it's a ZIP file
     if is_zip_file(content):
@@ -425,7 +425,7 @@ def download_and_extract(
                             f.write(overlay_file)
 
                         # Merge videos
-                        print(f"    Merging video overlay (this may take a while)...")
+                        print("    Merging video overlay (this may take a while)...")
                         success = merge_video_overlay(temp_main, temp_overlay, output_path)
 
                         if success:
@@ -567,9 +567,6 @@ def initialize_metadata(memories: list, output_path: Path) -> list:
     metadata_list = []
 
     for idx, memory in enumerate(memories, start=1):
-        file_num = f"{idx:02d}"
-        extension = get_file_extension(memory.get('media_type', 'Image'))
-
         metadata_list.append({
             'number': idx,
             'date': memory.get('date', 'Unknown'),
@@ -634,14 +631,13 @@ def merge_existing_files(folder_path: str) -> None:
 
         base_name = filename.replace('-main', '')
         extension = main_file.suffix
-        file_num = filename.split('-main')[0]
 
         # Look for corresponding overlay file
         overlay_file = folder / filename.replace('-main', '-overlay')
 
         if not overlay_file.exists():
             print(f"\n[SKIP] {filename}")
-            print(f"  No matching overlay file found")
+            print("  No matching overlay file found")
             skipped_count += 1
             continue
 
@@ -659,11 +655,11 @@ def merge_existing_files(folder_path: str) -> None:
 
             if is_video:
                 if not ffmpeg_available:
-                    print(f"  ERROR: FFmpeg not available for video merging")
+                    print("  ERROR: FFmpeg not available for video merging")
                     error_count += 1
                     continue
 
-                print(f"  Merging videos (this may take a while)...")
+                print("  Merging videos (this may take a while)...")
                 success = merge_video_overlay(main_file, overlay_file, output_file)
 
                 if success:
@@ -673,12 +669,12 @@ def merge_existing_files(folder_path: str) -> None:
                     os.utime(output_file, (main_stat.st_atime, main_stat.st_mtime))
                     merged_count += 1
                 else:
-                    print(f"  ERROR: Video merge failed")
+                    print("  ERROR: Video merge failed")
                     error_count += 1
 
             elif is_image:
                 if Image is None:
-                    print(f"  ERROR: Pillow not available for image merging")
+                    print("  ERROR: Pillow not available for image merging")
                     error_count += 1
                     continue
 
@@ -712,7 +708,7 @@ def merge_existing_files(folder_path: str) -> None:
     print("\n" + "=" * 60)
     print("Merge complete!")
     print(f"Summary: {merged_count} merged, {skipped_count} skipped, {error_count} errors")
-    print(f"\nNote: Original -main and -overlay files were NOT deleted")
+    print("\nNote: Original -main and -overlay files were NOT deleted")
 
 
 def download_all_memories(
@@ -932,8 +928,8 @@ if __name__ == '__main__':
 
     if not os.path.exists(HTML_FILE):
         print(f"Error: {HTML_FILE} not found!")
-        print(f"Usage: python download_memories.py [path/to/file_or_folder] [options]")
-        print(f"Run 'python download_memories.py --help' for more information.")
+        print("Usage: python download_memories.py [path/to/file_or_folder] [options]")
+        print("Run 'python download_memories.py --help' for more information.")
         sys.exit(1)
 
     # Extract flags

@@ -61,8 +61,9 @@ but are now separate options at the bottom of the list.
 - **Sets file timestamps to match original capture date**
 - Handles ZIP files with overlays (extracts to `-main` and `-overlay` files)
 - **Optional overlay merging** - Combine overlay on top of main content (images and videos)
-  - Images: Fast, instant processing
+  - Images: Fast, instant processing (supports JPG, PNG, WebP, GIF, BMP, TIFF)
   - Videos: Requires FFmpeg, may take 1-5 minutes per video
+- **Merge existing files** - Retroactively merge already-downloaded `-main`/`-overlay` files without re-downloading
 - Saves complete `metadata.json` with all information
 - **Resume/Retry support** - Pick up where you left off or retry failed downloads
 - Incremental metadata updates - Track download progress in real-time
@@ -239,6 +240,24 @@ This will:
 - Skip all videos (already downloaded)
 - Re-download and process only pictures
 - Merge picture overlays if `--merge-overlays` is specified
+
+### Merge Already-Downloaded Files
+
+If you already have `-main` and `-overlay` files downloaded and want to merge them without re-downloading:
+
+```bash
+python download_memories.py --merge-existing ./memories
+```
+
+This will:
+- Scan the specified folder for `-main` and `-overlay` file pairs
+- Merge them using FFmpeg (videos) or Pillow (images)
+- Create merged files WITHOUT deleting the original `-main`/`-overlay` files
+- Support all image formats: JPG, PNG, WebP, GIF, BMP, TIFF
+
+**Use case**: You previously downloaded your memories without `--merge-overlays`, and now you want to create merged versions while keeping the original separate files.
+
+**Note**: To get `-main` and `-overlay` files in the first place, download without the `--merge-overlays` flag.
 
 ### View All Options
 
