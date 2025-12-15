@@ -435,6 +435,20 @@ def download_and_extract(
                                 'type': 'merged'
                             })
                             print(f"    Merged video: {output_filename}")
+
+                            # Set file timestamp to match original Snapchat date
+                            set_file_timestamp(output_path, timestamp)
+
+                            # Delete any previously saved -main/-overlay files
+                            main_file = base_path / f"{file_num}-main{extension}"
+                            overlay_file = base_path / f"{file_num}-overlay{extension}"
+                            if main_file.exists():
+                                main_file.unlink()
+                                print(f"    Deleted separate file: {file_num}-main{extension}")
+                            if overlay_file.exists():
+                                overlay_file.unlink()
+                                print(f"    Deleted separate file: {file_num}-overlay{extension}")
+
                             merge_attempted = True
                         else:
                             print("    Warning: Video merge failed, saving separate files instead...")
@@ -471,6 +485,9 @@ def download_and_extract(
 
                     with open(output_path, 'wb') as f:
                         f.write(file_data)
+
+                    # Set file timestamp to match original Snapchat date
+                    set_file_timestamp(output_path, timestamp)
 
                     files_saved.append({
                         'path': output_filename,
