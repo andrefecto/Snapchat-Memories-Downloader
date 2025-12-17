@@ -949,21 +949,35 @@
     let totalVideosProcessed = 0;
 
     /**
-     * Terminate FFmpeg.wasm instance and release memory
+     * Terminate FFmpeg.wasm instance and release memory.
+     *
+     * CRITICAL: FFmpeg.wasm has memory leak issues in browser environments.
+     * Processing multiple videos without resetting causes:
+     * - Gradual memory accumulation (WASM heap grows but doesn't shrink)
+     * - Browser slowdown and eventual crashes
+     * - Black screen output from FFmpeg after N videos
+     *
+     * Solution: Periodically terminate and recreate FFmpeg instance.
+     * This forces browser garbage collection of WASM memory.
+     *
+     * Called:
+     * - After processing N videos (configurable: 5, 10, 20, or unlimited)
+     * - After errors to ensure clean state for next attempt
+     * - On force reload
      */
     async function terminateFFmpeg() {
       if (ffmpegInstance) {
         try {
-          // Remove all event listeners
+          // Remove all event listeners to prevent memory leaks
           ffmpegInstance.off('log');
           ffmpegInstance.off('progress');
-          // Note: FFmpeg.wasm doesn't have a built-in terminate method
-          // Setting to null allows garbage collection
+          // Note: FFmpeg.wasm doesn't have a built-in terminate/destroy method
+          // Setting to null allows JavaScript garbage collection
           ffmpegInstance = null;
           ffmpegLoaded = false;
           videosProcessedSinceReset = 0;
           addLog('  FFmpeg instance terminated, memory released', 'info');
-          // Give browser time to garbage collect
+          // Give browser time to garbage collect WASM memory
           await new Promise(resolve => setTimeout(resolve, 500));
         } catch (error) {
           console.warn('Error terminating FFmpeg:', error);
@@ -972,8 +986,26 @@
     }
 
     /**
-     * Initialize FFmpeg.wasm instance
+     * Initialize FFmpeg.wasm instance with memory leak mitigation.
+     *
+     * FFmpeg.wasm Memory Management:
+     * - WebAssembly modules don't automatically garbage collect memory
+     * - Processing videos accumulates memory in WASM heap
+     * - Auto-reset after N videos prevents memory exhaustion
+     *
+     * Reset Intervals (user configurable):
+     * - 5 videos: Most aggressive, safest for low-memory devices
+     * - 10 videos: Balanced (default)
+     * - 20 videos: Less frequent resets, faster for high-memory systems
+     * - Unlimited: No auto-reset (risky, only for small batches)
+     *
+     * Browser Compatibility:
+     * - Chrome/Edge: Best support, memory monitoring available
+     * - Firefox: Known WASM issues, may produce black screens
+     * - Safari: Generally works but slower
+     *
      * @param {boolean} forceReload - Force recreation even if already loaded
+     * @returns {FFmpeg} FFmpeg.wasm instance
      */
     async function initFFmpeg(forceReload = false) {
       // Check if we need to reset due to memory concerns
@@ -1376,10 +1408,36 @@
 
     /**
      * Merge overlay video on top of main video using FFmpeg.wasm
+     *
+     * This is the slowest operation in the web version (1-5 minutes per video).
+     * FFmpeg.wasm runs in WebAssembly, which is slower than native FFmpeg.
+     *
+     * Process:
+     * 1. Write input files to FFmpeg's virtual filesystem (in-memory)
+     * 2. Convert image overlays to PNG (FFmpeg.wasm compatibility)
+     * 3. Probe main video dimensions for proper overlay scaling
+     * 4. Execute FFmpeg with filter chain to composite overlay
+     * 5. Read output from virtual filesystem
+     * 6. CRITICAL: Extract data correctly (see return statement)
+     * 7. Clean up virtual filesystem
+     *
+     * FFmpeg Filter Strategies:
+     * - Image overlay: Loop image infinitely, scale to video size, center
+     * - Video overlay: Simplified filter (complex filters cause black screens in WASM)
+     * - Firefox: Use veryfast preset (known WASM compatibility issues)
+     *
+     * Common Failures:
+     * - Output < 1000 bytes: Encoding failure
+     * - Black screen: Filter too complex for WASM or Firefox browser
+     * - Memory error: Need to reset FFmpeg instance
+     * - "Media Offline": Corrupted output due to incorrect buffer extraction (FIXED)
+     *
      * @param {ArrayBuffer} mainData - Main video data
-     * @param {ArrayBuffer} overlayData - Overlay video data
+     * @param {ArrayBuffer} overlayData - Overlay video/image data
      * @param {Function} progressCallback - Optional progress callback (receives percentage)
-     * @returns {Promise<ArrayBuffer>} - Merged video
+     * @param {boolean} overlayIsImage - True if overlay is image (png/jpg), False if video
+     * @param {string} overlayExt - Overlay file extension (e.g., '.mp4', '.png')
+     * @returns {Promise<ArrayBuffer>} - Merged video data
      */
     async function mergeVideoOverlay(
       mainData,
@@ -1388,7 +1446,7 @@
       overlayIsImage = false,
       overlayExt = '.mp4'
     ) {
-      const ffmpeg = await initFFmpeg(); // Will auto-reset if needed
+      const ffmpeg = await initFFmpeg(); // Will auto-reset if needed (memory management)
 
       if (!ffmpeg) {
         throw new Error("FFmpeg.wasm not available");
@@ -1396,7 +1454,8 @@
 
       let overlayFilename;
       try {
-        // Write input files to FFmpeg virtual filesystem
+        // Write input files to FFmpeg's in-memory virtual filesystem
+        // FFmpeg.wasm doesn't access real filesystem, uses virtual FS for security
         await ffmpeg.writeFile("main.mp4", new Uint8Array(mainData));
 
         // Convert image overlays to PNG for FFmpeg.wasm compatibility
@@ -1586,12 +1645,28 @@
         // Remove progress listener
         ffmpeg.off("progress");
 
-        // Increment success counter
+        // Increment success counter for memory management tracking
         videosProcessedSinceReset++;
         totalVideosProcessed++;
 
         // Convert Uint8Array to ArrayBuffer
-        return outputData.buffer;
+        // CRITICAL BUG FIX: Must use .slice().buffer, NOT .buffer directly!
+        //
+        // Why this matters:
+        // - FFmpeg.readFile() returns a Uint8Array that may be a VIEW into a larger ArrayBuffer
+        // - Using .buffer directly returns the ENTIRE underlying ArrayBuffer (with garbage data)
+        // - This creates corrupted video files with extra bytes at the end
+        // - Video players show "Media Offline" error due to invalid data after video stream
+        //
+        // Solution:
+        // - .slice() creates NEW Uint8Array with ONLY the valid data (no excess buffer)
+        // - .buffer then extracts the clean ArrayBuffer
+        //
+        // Example:
+        // outputData = Uint8Array(1000 bytes) backed by ArrayBuffer(4096 bytes)
+        // outputData.buffer → 4096 bytes (WRONG! Has 3096 bytes of garbage)
+        // outputData.slice().buffer → 1000 bytes (CORRECT! Only video data)
+        return outputData.slice().buffer;
       } catch (error) {
         // Clean up on error
         try {
@@ -2119,7 +2194,34 @@
     }
 
     /**
-     * Process all deferred video overlays after main download completes
+     * Process all deferred video overlays after main download completes.
+     *
+     * DEFERRED PROCESSING PATTERN - Critical for memory management:
+     *
+     * Why defer video overlay processing?
+     * 1. Video merging with FFmpeg.wasm is SLOW (1-5 minutes per video)
+     * 2. Merging during download blocks other downloads (lost time)
+     * 3. FFmpeg.wasm accumulates memory that can't be released mid-download
+     * 4. Browser may run out of memory before downloads complete
+     *
+     * Deferred approach:
+     * - Phase 1: Download all content quickly (main + overlay files saved separately)
+     * - Phase 2: Process video merges in batch (user can pause/resume)
+     * - Each merged video downloads as separate ZIP immediately (prevents memory buildup)
+     * - 2-second GC pause between videos (allows browser to recover memory)
+     *
+     * Trade-offs:
+     * + Uninterrupted downloading (no 5-minute pauses per video)
+     * + Better memory management (can reset FFmpeg between videos)
+     * + User can stop/resume overlay processing separately
+     * - Temporarily uses more disk space (main + overlay files kept until merge)
+     * - User gets multiple ZIP files instead of one
+     *
+     * Memory management during deferred processing:
+     * - FFmpeg instance auto-resets every N videos (configurable)
+     * - Each video downloads in own ZIP immediately (frees RAM)
+     * - 2-second pause between videos for garbage collection
+     * - Memory warnings if Chrome detects >60% usage
      */
     async function processDeferredVideoOverlays(metadataList) {
       const total = deferredVideoOverlays.length;
@@ -2132,7 +2234,7 @@
         addLog(`\n[${i + 1}/${total}] Processing deferred video #${metadata.number}`, "info");
 
         try {
-          // Get main and overlay files
+          // Extract main and overlay files from the ZIP we saved earlier
           let mainData = null;
           let overlayData = null;
           let mainName = null;
@@ -2655,9 +2757,19 @@
                     }
 
                     // Store videos uncompressed to prevent browser playback issues
+                    // CRITICAL: Videos MUST use compression: "STORE" (no compression)
+                    //
+                    // Why no compression for videos?
+                    // - MP4/video files are ALREADY compressed (H.264, H.265, etc.)
+                    // - ZIP DEFLATE compression on already-compressed data provides minimal benefit
+                    // - Some browser ZIP decoders BREAK when re-compressing video streams
+                    // - Symptoms: Video won't play, shows errors, or corrupted frames
+                    // - STORE mode = no compression = direct copy into ZIP (safe, fast)
+                    //
+                    // Images can use DEFLATE compression (default) without issues
                     const zipOptions = { date: fileDate };
                     if (metadata.media_type === "Video") {
-                      zipOptions.compression = "STORE";
+                      zipOptions.compression = "STORE";  // No compression for videos
                     }
 
                     zip.file(newFilename, fileData, zipOptions);

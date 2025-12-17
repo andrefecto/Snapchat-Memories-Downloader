@@ -2,6 +2,20 @@
 """
 Snapchat Memories Downloader
 Downloads all memories from Snapchat export HTML file with metadata preservation.
+
+Architecture:
+1. Parse memories_history.html to extract URLs, dates, GPS coordinates
+2. Download files from Snapchat CDN (may be ZIPs containing overlays)
+3. Optionally merge overlays onto main content (images: instant, videos: FFmpeg)
+4. Embed EXIF metadata (GPS + timestamp) into images
+5. Track progress in metadata.json for resume/retry capability
+6. Set file timestamps to match original Snapchat capture dates
+
+Key Design Patterns:
+- Metadata state machine: pending → in_progress → success/failed/skipped
+- Duplicate detection happens DURING download (not post-process) to save bandwidth
+- Deferred video processing: downloads all first, merges videos at end (memory optimization)
+- Graceful degradation: optional dependencies (Pillow, piexif, FFmpeg) disable features vs failing
 """
 
 import re
@@ -17,6 +31,9 @@ import io
 import subprocess
 import hashlib
 
+# === DEPENDENCY CHECKS ===
+# All dependencies use graceful degradation - missing deps disable features, not crash
+
 try:
     import requests
 except ImportError:
@@ -29,16 +46,17 @@ try:
 except ImportError:
     print("Warning: Pillow not found. Overlay merging will be disabled.")
     print("Install with: pip install -r requirements.txt")
-    Image = None
+    Image = None  # Setting to None allows feature checks with "if Image is not None"
 
 try:
     import piexif
 except ImportError:
     print("Warning: piexif not found. EXIF metadata writing will be disabled.")
     print("Install with: pip install -r requirements.txt")
-    piexif = None
+    piexif = None  # Setting to None allows feature checks
 
 # Check if ffmpeg is available for video overlay merging
+# Note: ffmpeg must be installed separately (not a Python package)
 try:
     ffmpeg_available = subprocess.run(
         ['ffmpeg', '-version'],
@@ -56,46 +74,76 @@ if not ffmpeg_available:
 
 
 class MemoriesParser(HTMLParser):
-    """Parse Snapchat memories_history.html to extract memory data."""
+    """
+    Parse Snapchat memories_history.html to extract memory data.
+
+    Snapchat's HTML format:
+    - Table rows (<tr>) contain memory entries
+    - Each row has cells (<td>) with: date, media type, location
+    - Download link is in <a onclick="downloadMemories('URL', ...)">
+
+    Extraction strategy:
+    - Track table rows (<tr>) as containers for memory data
+    - Extract data from <td> cells based on content patterns (not column order)
+    - Parse onclick attribute to get download URL
+
+    Example HTML structure:
+    <tr>
+      <td>2025-11-30 00:31:09 UTC</td>
+      <td><a onclick="downloadMemories('https://...', ...)">Download</a></td>
+      <td>Video</td>
+      <td>Latitude, Longitude: 34.05, -118.25</td>
+    </tr>
+    """
 
     def __init__(self):
         super().__init__()
-        self.memories = []
-        self.current_row = {}
-        self.current_tag = None
-        self.in_table_row = False
-        self.cell_index = 0
+        self.memories = []  # List of extracted memory dicts
+        self.current_row = {}  # Currently parsing row data
+        self.current_tag = None  # Currently parsing tag type
+        self.in_table_row = False  # Whether we're inside a <tr>
+        self.cell_index = 0  # Track cell position (currently unused)
 
     def handle_starttag(self, tag, attrs):
+        """Called when parser encounters an opening tag like <tr> or <td>."""
         if tag == 'tr':
+            # Start of new table row - reset row data
             self.in_table_row = True
             self.current_row = {}
             self.cell_index = 0
         elif tag == 'td' and self.in_table_row:
+            # Table cell - content will come in handle_data()
             self.current_tag = 'td'
         elif tag == 'a' and self.in_table_row:
             # Extract URL from onclick attribute
+            # Format: onclick="downloadMemories('https://...', ...)"
             for attr_name, attr_value in attrs:
                 if attr_name == 'onclick' and attr_value and 'downloadMemories' in attr_value:
-                    # Extract URL from onclick="downloadMemories('URL', ...)"
+                    # Use regex to extract URL from JavaScript function call
                     url_match = re.search(r"downloadMemories\('([^']+)'", attr_value)
                     if url_match:
                         self.current_row['url'] = url_match.group(1)
 
     def handle_data(self, data):
+        """
+        Called when parser encounters text content between tags.
+        Uses content-based detection (not column order) for robustness.
+        """
         if self.current_tag == 'td' and data.strip():
-            # Determine which column based on content
+            # Determine which column based on content patterns
             data = data.strip()
 
-            # Date column (contains UTC timestamp)
+            # Date column: Contains "UTC" string
+            # Example: "2025-11-30 00:31:09 UTC"
             if 'UTC' in data:
                 self.current_row['date'] = data
-            # Media type column
+            # Media type column: Exactly "Image" or "Video"
             elif data in ['Image', 'Video']:
                 self.current_row['media_type'] = data
-            # Location column
+            # Location column: Contains "Latitude, Longitude:" prefix
+            # Example: "Latitude, Longitude: 34.052235, -118.243683"
             elif 'Latitude, Longitude:' in data:
-                # Extract lat/lon
+                # Extract coordinates
                 coords = data.replace('Latitude, Longitude:', '').strip()
                 lat_lon = coords.split(',')
                 if len(lat_lon) == 2:
@@ -103,10 +151,12 @@ class MemoriesParser(HTMLParser):
                     self.current_row['longitude'] = lat_lon[1].strip()
 
     def handle_endtag(self, tag):
+        """Called when parser encounters a closing tag like </tr> or </td>."""
         if tag == 'td':
             self.current_tag = None
         elif tag == 'tr' and self.in_table_row:
-            # Save row if it has required data
+            # End of table row - save if we got minimum required data
+            # Minimum requirement: URL and date (other fields can be missing)
             if 'url' in self.current_row and 'date' in self.current_row:
                 self.memories.append(self.current_row.copy())
             self.in_table_row = False
@@ -128,16 +178,38 @@ def parse_html_file(html_path: str) -> list:
 
 
 def is_zip_file(content: bytes) -> bool:
-    """Check if content is a ZIP file."""
+    """
+    Check if content is a ZIP file by examining magic bytes.
+
+    ZIP files start with "PK" (0x50 0x4B) - named after Phil Katz, ZIP creator.
+    This is more reliable than file extensions which can be misleading.
+
+    Snapchat uses ZIP files to bundle main content + overlay files together.
+    Example: A video with text overlay comes as ZIP containing:
+      - video-main.mp4 (original video)
+      - video-overlay.mp4 or .png (overlay content)
+    """
     return content[:2] == b'PK'
 
 
 def decimal_to_dms(decimal: float) -> tuple:
     """
-    Convert decimal coordinates to degrees, minutes, seconds format for EXIF.
-    Returns: ((degrees, 1), (minutes, 1), (seconds, 100))
+    Convert decimal coordinates to degrees, minutes, seconds (DMS) format for EXIF.
+
+    EXIF GPS coordinates use DMS format with rational numbers (fraction tuples).
+    Example: 34.052235° becomes ((34, 1), (3, 1), (808, 100))
+                                  = 34° 3' 8.08"
+
+    Args:
+        decimal: Coordinate as decimal float (e.g., 34.052235)
+
+    Returns:
+        Tuple of 3 rational numbers: ((degrees, 1), (minutes, 1), (seconds, 100))
+        The denominators preserve precision:
+        - degrees and minutes use denominator 1 (integers)
+        - seconds use denominator 100 (preserves 2 decimal places)
     """
-    decimal = abs(decimal)
+    decimal = abs(decimal)  # Work with absolute value; sign handled separately in EXIF
 
     degrees = int(decimal)
     minutes_decimal = (decimal - degrees) * 60
@@ -160,23 +232,42 @@ def add_exif_metadata(
     longitude: str
 ) -> bytes:
     """
-    Add EXIF metadata (GPS and date) to image data.
-    Preserves original image format (JPEG, PNG, WebP, etc.).
-    Returns new image data with EXIF embedded.
+    Add EXIF metadata (GPS coordinates + timestamp) to image data.
+
+    CRITICAL: Preserves original image format (JPEG, PNG, WebP, etc.) to avoid quality loss.
+    Format-specific handling:
+    - JPEG: Full EXIF support (GPS + timestamp), convert RGBA→RGB (JPEG doesn't support alpha)
+    - PNG: Limited EXIF support (varies by encoder), some may only preserve timestamp
+    - WebP: Full EXIF support (GPS + timestamp)
+    - Other formats: Return original data unchanged to avoid errors
+
+    EXIF structure:
+    - "0th" IFD: General image data (DateTime)
+    - "Exif" IFD: Extended data (DateTimeOriginal, DateTimeDigitized)
+    - "GPS" IFD: GPS coordinates in DMS format + direction refs (N/S, E/W)
+
+    Args:
+        image_data: Raw image bytes
+        date_str: Snapchat date string (e.g., "2025-11-30 00:31:09 UTC")
+        latitude: Latitude as string (e.g., "34.052235")
+        longitude: Longitude as string (e.g., "-118.243683")
+
+    Returns:
+        Image bytes with EXIF embedded, or original bytes if EXIF fails
     """
     if piexif is None or Image is None:
         return image_data
 
     try:
-        # Parse coordinates
+        # Parse coordinates (may be 'Unknown' if location not available)
         lat = float(latitude) if latitude != 'Unknown' else None
         lon = float(longitude) if longitude != 'Unknown' else None
 
-        # Load image
+        # Load image and detect format
         img = Image.open(io.BytesIO(image_data))
-        original_format = img.format  # Preserve original format
+        original_format = img.format  # CRITICAL: Preserve to avoid quality loss
 
-        # Create EXIF dict
+        # Create EXIF dict with 3 IFDs (Image File Directories)
         exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
 
         # Add date/time
@@ -301,9 +392,32 @@ def merge_video_overlay(
     """
     Merge overlay video on top of main video using FFmpeg.
 
+    This is the slowest operation in the entire program (1-5 minutes per video).
+    Uses complex FFmpeg filter chain to handle overlay synchronization and scaling.
+
+    FFmpeg filter chain explanation:
+    1. [0:v]fps=30,setsar=1[base]
+       - Normalize main video to 30fps, set sample aspect ratio to 1:1
+    2. [1:v]fps=30,setsar=1,loop...[ovr_tmp]
+       - Normalize overlay to 30fps
+       - Loop overlay indefinitely (loop=-1) to match main video length
+       - Reset timestamps for synchronization
+    3. [ovr_tmp][base]scale2ref[ovr][base]
+       - Scale overlay to exactly match main video dimensions
+       - scale2ref ensures perfect size match (critical for overlay positioning)
+    4. [base][ovr]overlay=format=auto:shortest=1[outv]
+       - Composite overlay on top of main video
+       - shortest=1 stops when main video ends (even if overlay longer)
+
+    Common failure modes:
+    - FFmpeg not installed → RuntimeError
+    - Timeout (>5 min) → Returns False
+    - Output file < 1000 bytes → Returns False (indicates encoding failure)
+    - FFmpeg error → Returns False (stderr logged for debugging)
+
     Args:
         main_path: Path to main video file (MP4)
-        overlay_path: Path to overlay video file (MP4)
+        overlay_path: Path to overlay video file (MP4 or image)
         output_path: Path where merged video should be saved
 
     Returns:
@@ -313,29 +427,33 @@ def merge_video_overlay(
         raise RuntimeError("FFmpeg is not available")
 
     try:
-        # Build FFmpeg command
-        # Use scale2ref to match overlay dimensions to main video
+        # Build FFmpeg command with complex filter chain
+        # Scale2ref ensures overlay matches main video dimensions exactly
         cmd = [
             'ffmpeg',
-            '-i', str(main_path),
-            '-i', str(overlay_path),
+            '-i', str(main_path),       # Input 0: Main video
+            '-i', str(overlay_path),    # Input 1: Overlay video/image
             '-filter_complex',
             (
+                # Step 1: Normalize main video framerate and aspect ratio
                 '[0:v]fps=30,setsar=1[base];'
+                # Step 2: Normalize overlay, loop it to match main duration
                 '[1:v]fps=30,setsar=1,'
                 'loop=loop=-1:size=32767:start=0,setpts=N/FRAME_RATE/TB[ovr_tmp];'
+                # Step 3: Scale overlay to match main video size
                 '[ovr_tmp][base]scale2ref[ovr][base];'
+                # Step 4: Composite overlay on top, stop at shortest input
                 '[base][ovr]overlay=format=auto:shortest=1[outv]'
             ),
-            '-map', '[outv]',
-            '-map', '0:a?',
-            '-c:v', 'libx264',
-            '-preset', 'medium',
-            '-crf', '23',
-            '-pix_fmt', 'yuv420p',
-            '-c:a', 'copy',
-            '-movflags', '+faststart',
-            '-y',
+            '-map', '[outv]',         # Use filtered video output
+            '-map', '0:a?',           # Copy audio from main (? = optional)
+            '-c:v', 'libx264',        # Encode video with H.264
+            '-preset', 'medium',      # Encoding speed vs quality tradeoff
+            '-crf', '23',             # Quality: 23 is good default (lower = better)
+            '-pix_fmt', 'yuv420p',    # Pixel format for compatibility
+            '-c:a', 'copy',           # Copy audio without re-encoding
+            '-movflags', '+faststart', # Enable streaming (moov atom at start)
+            '-y',                     # Overwrite output file if exists
             str(output_path)
         ]
 
@@ -380,29 +498,63 @@ def download_and_extract(
     check_duplicates: bool = False
 ) -> list:
     """
-    Download a file from URL. If it's a ZIP with overlay, extract and optionally merge.
-    Adds EXIF metadata (GPS and date) to images.
-    Returns list of dicts with file info: [{'path': path, 'size': size, 'type': 'main'/'overlay'/'merged'}]
-    Returns empty list if overlays_only=True and file has no overlay.
+    Download and process a single memory file from Snapchat CDN.
+
+    This is the CORE function that handles all download logic including:
+    - Downloading from Snapchat URLs (may expire after ~1 year)
+    - Detecting ZIP files containing overlays (via magic bytes)
+    - Extracting and optionally merging overlay content
+    - Adding EXIF metadata (GPS + timestamp) to images
+    - Duplicate detection DURING download (saves bandwidth vs post-processing)
+    - Deferred video overlay processing (downloads first, merges later)
+
+    File type detection:
+    - ZIP file (magic bytes 'PK'): Contains main + overlay files
+    - Single file: Standalone image or video without overlay
+
+    Overlay merge modes:
+    1. Images: Instant merge using Pillow (alpha compositing)
+    2. Videos: FFmpeg merge (1-5 min) or defer until end if defer_video_overlays=True
+    3. No merge: Save as separate -main and -overlay files
 
     Args:
-        use_timestamp_filenames: If True, name files as YYYY.MM.DD-HH:MM:SS.ext instead of sequential numbers
+        url: Snapchat CDN URL (may expire)
+        base_path: Output directory path
+        file_num: Sequential number for filename (e.g., "01", "02")
+        extension: File extension based on media type (.mp4 or .jpg)
+        merge_overlays: If True, composite overlay on top of main content
+        defer_video_overlays: If True, skip video merging now (process later in batch)
+        date_str: Snapchat date string for EXIF and timestamps
+        latitude: GPS latitude for EXIF
+        longitude: GPS longitude for EXIF
+        overlays_only: If True, skip files without overlays
+        use_timestamp_filenames: If True, use YYYY.MM.DD-HH:MM:SS.ext naming
+        check_duplicates: If True, skip download if identical file exists
+
+    Returns:
+        List of dicts with file info: [{'path': str, 'size': int, 'type': str}]
+        Returns empty list if overlays_only=True and file has no overlay
+        Type can be: 'main', 'overlay', 'merged', 'single', 'duplicate'
     """
+    # Use Mozilla User-Agent to avoid bot detection
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
     }
 
+    # Download file from Snapchat CDN
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
 
     content = response.content
     files_saved = []
 
-    # Validate downloaded content
+    # Validate downloaded content size
+    # Files < 100 bytes are likely error pages or expired URL responses
     if len(content) < 100:
         print(f"    WARNING: Downloaded file is very small ({len(content)} bytes) - may be invalid or expired URL")
 
-    # Check if it's a ZIP file first (videos with overlays come as ZIP)
+    # Check if it's a ZIP file (contains overlay content)
+    # ZIP magic bytes = 'PK' (0x50 0x4B)
     if is_zip_file(content):
         # Extract ZIP contents
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
@@ -730,12 +882,32 @@ def compute_data_hash(data: bytes) -> str:
 def is_duplicate_file(data: bytes, output_path: Path, check_duplicates: bool) -> tuple[bool, str | None]:
     """
     Check if data is a duplicate of any existing file in the output directory.
-    Returns (is_duplicate, existing_file_path)
+
+    CRITICAL DESIGN: This runs DURING download (not post-processing) to immediately
+    save bandwidth and disk space. When a duplicate is detected, download is skipped.
+
+    Two-stage detection for performance:
+    1. Quick size check (fast, eliminates most non-duplicates)
+    2. MD5 hash comparison (only if size matches)
+
+    This is more efficient than checking MD5 first since:
+    - File size check is O(1) filesystem metadata read
+    - MD5 requires reading entire file content
+
+    Args:
+        data: Downloaded file bytes to check
+        output_path: Directory containing existing files
+        check_duplicates: If False, skip duplicate detection entirely
+
+    Returns:
+        Tuple of (is_duplicate: bool, existing_file_path: str | None)
+        If duplicate found, returns (True, "existing_filename.ext")
+        If unique, returns (False, None)
     """
     if not check_duplicates:
         return (False, None)
 
-    # Compute hash of new data
+    # Compute hash of newly downloaded data
     new_hash = compute_data_hash(data)
     new_size = len(data)
 
@@ -744,13 +916,15 @@ def is_duplicate_file(data: bytes, output_path: Path, check_duplicates: bool) ->
         if existing_file.is_file() and existing_file.name != 'metadata.json':
             try:
                 existing_size = existing_file.stat().st_size
-                # Quick size check first
+                # Quick size check first (fast, eliminates most non-matches)
                 if existing_size == new_size:
-                    # Size matches, compute hash
+                    # Size matches, compute hash (slower but necessary)
                     existing_hash = compute_file_hash(existing_file)
                     if existing_hash == new_hash:
+                        # Exact duplicate found!
                         return (True, existing_file.name)
             except Exception:
+                # Ignore errors reading files (permissions, deleted files, etc.)
                 continue
 
     return (False, None)
