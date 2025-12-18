@@ -2033,7 +2033,7 @@
       let metadataList = [];
 
       // Check if we're in metadata-only mode (resume without HTML)
-      const metadataOnlyMode = existingMetadata && !memories;
+      const metadataOnlyMode = existingMetadata && (!memories || memories.length === 0);
 
       if (metadataOnlyMode) {
         // Metadata-only resume: use existing metadata directly
