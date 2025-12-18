@@ -1921,11 +1921,11 @@
       currentIndex = 0;
       deferredVideoOverlays = []; // Clear deferred videos from previous runs
 
-      // Initialize or use existing metadata
-      let metadataList = existingMetadata || [];
+      // Initialize metadata by matching existing metadata with freshly parsed memories
+      let metadataList = [];
 
-      // If no existing metadata, create new entries with pending status
       if (!existingMetadata) {
+        // No existing metadata: create new entries with pending status
         for (let i = 0; i < memories.length; i++) {
           const memory = memories[i];
           metadataList.push({
@@ -1941,8 +1941,62 @@
         }
         addLog("Initialized metadata for all memories", "info");
       } else {
+        // Existing metadata provided: match with current memories by URL
+        // This handles cases where new memories were added or order changed
         addLog(
-          "Using existing metadata - will skip successful downloads",
+          "Merging existing metadata with current HTML parse...",
+          "info"
+        );
+
+        // Create a map of existing metadata by URL for fast lookup
+        const existingByUrl = new Map();
+        existingMetadata.forEach((meta) => {
+          existingByUrl.set(meta.url, meta);
+        });
+
+        // Process all memories from current HTML parse
+        let newCount = 0;
+        let mergedCount = 0;
+        for (let i = 0; i < memories.length; i++) {
+          const memory = memories[i];
+          const existing = existingByUrl.get(memory.url);
+
+          if (existing) {
+            // Memory exists in metadata: preserve status and files
+            metadataList.push({
+              number: i + 1,
+              date: memory.date,
+              media_type: memory.mediaType,
+              latitude: memory.latitude,
+              longitude: memory.longitude,
+              url: memory.url,
+              status: existing.status || "pending",
+              files: existing.files || [],
+              error: existing.error, // Preserve error if it exists
+            });
+            mergedCount++;
+          } else {
+            // New memory not in metadata: add as pending
+            metadataList.push({
+              number: i + 1,
+              date: memory.date,
+              media_type: memory.mediaType,
+              latitude: memory.latitude,
+              longitude: memory.longitude,
+              url: memory.url,
+              status: "pending",
+              files: [],
+            });
+            newCount++;
+          }
+        }
+
+        addLog(
+          `Merged ${mergedCount} existing entries, added ${newCount} new entries`,
+          "info"
+        );
+        addLog(
+          "Will skip successful downloads and retry failed/pending items",
           "info"
         );
       }
@@ -2357,7 +2411,6 @@
      */
     async function processItem(batchItem, globalCount, totalItems, metadataList) {
       const { metadata, index: i } = batchItem;
-      const memory = memories[i];
       const fileNum = String(metadata.number).padStart(2, "0");
       const extension = metadata.media_type === "Video" ? ".mp4" : ".jpg";
 
