@@ -937,10 +937,15 @@
           Python Script Version
         </a>
       </div>
+      <div style="color: #999; font-size: 12px; margin-top: 10px" id="version-display">
+        <!-- Version will be inserted here by JavaScript -->
+      </div>
     </div>
   </div>
 
   <script>
+    // Version number - update this when making significant changes
+    const APP_VERSION = 'v1.0.0';
     // Global resource load error listener for debugging 404s
     window.addEventListener('error', function (e) {
       try {
@@ -974,6 +979,14 @@
     let ffmpegInstance = null;
     let videosProcessedSinceReset = 0;
     let totalVideosProcessed = 0;
+
+    // Display version info
+    console.log(`%cSnapchat Memories Downloader ${APP_VERSION}`, 'font-weight: bold; font-size: 14px; color: #667eea;');
+    console.log(`Report issues: https://github.com/andrefecto/Snapchat-Memories-Downloader/issues`);
+    const versionDisplay = document.getElementById('version-display');
+    if (versionDisplay) {
+      versionDisplay.textContent = `Web Version ${APP_VERSION}`;
+    }
 
     /**
      * Terminate FFmpeg.wasm instance and release memory.
