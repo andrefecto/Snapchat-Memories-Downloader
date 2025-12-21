@@ -59,6 +59,7 @@ but are now separate options at the bottom of the list.
 - **Timestamp-based filenames** (Python) - Name files as `YYYY.MM.DD-HH:MM:SS.ext` for easy sorting by date
 - **Preserves ALL metadata**: dates, GPS coordinates, media type
 - **Embeds EXIF metadata into images** - GPS coordinates and dates show up in Photos apps
+- **Timezone-aware metadata** - Converts UTC timestamps to local time based on GPS coordinates
 - **Sets file timestamps to match original capture date**
 - Handles ZIP files with overlays (extracts to `-main` and `-overlay` files)
 - **Optional overlay merging** - Combine overlay on top of main content (images and videos)
@@ -183,6 +184,50 @@ python download_memories.py --retry-failed
 
 ### Advanced Features
 
+#### 🌍 Timezone-Aware Metadata
+
+Convert UTC timestamps to local timezone based on GPS coordinates:
+
+```bash
+python download_memories.py --local-timezone
+```
+
+**What this does:**
+
+- ✅ Automatically detects local timezone from GPS coordinates
+- ✅ Converts all EXIF timestamps from UTC to local time
+- ✅ Embeds modern EXIF offset tags (`OffsetTime`, `OffsetTimeOriginal`, `OffsetTimeDigitized`)
+- ✅ Updates video metadata with local time and timezone info
+- ✅ Photos show correct local capture time in photo library apps
+
+**Example:**
+
+If a photo was taken at 15:30 UTC in New York (EST = UTC-5), it will be stored as:
+- EXIF timestamp: `2024:12:15 10:30:00`
+- EXIF offset: `-05:00`
+
+**Requirements:**
+
+- `timezonefinder` library (installed by setup.sh)
+- `pytz` library (installed by setup.sh)
+- Valid GPS coordinates in Snapchat data
+
+**Special handling:**
+
+- Czech Republic coordinates automatically use `Europe/Prague` timezone
+- Graceful fallback to UTC if GPS data is missing
+- Works with all image formats (JPEG, PNG, WebP, etc.)
+
+**Combine with other features:**
+
+```bash
+# Timezone-aware + overlay merging + timestamp filenames
+python download_memories.py --local-timezone --merge-overlays --timestamp-filenames
+
+# Timezone-aware for re-processing existing videos
+python download_memories.py --videos-only --local-timezone
+```
+
 #### Merge Overlays
 
 Combine overlay files with main content:
@@ -261,13 +306,17 @@ Detects videos taken within 10 seconds and concatenates them.
 # All the features!
 python download_memories.py \
   -o ~/Desktop/memories \
+  --local-timezone \
   --timestamp-filenames \
   --remove-duplicates \
   --merge-overlays \
   --join-multi-snaps
 
-# Resume with duplicate detection
-python download_memories.py --resume --remove-duplicates
+# Resume with duplicate detection and timezone support
+python download_memories.py --resume --remove-duplicates --local-timezone
+
+# Re-process videos with timezone and overlay merging
+python download_memories.py --videos-only --local-timezone --merge-overlays
 ```
 
 ### Getting Help
@@ -365,6 +414,11 @@ For merged overlays (when using `--merge-overlays` flag):
 - `requests` library (installed automatically by setup.sh)
 - `Pillow` library (for overlay merging and EXIF metadata, installed automatically by setup.sh)
 - `piexif` library (for EXIF metadata embedding, installed automatically by setup.sh)
+- `timezonefinder` library (for timezone detection, installed automatically by setup.sh)
+- `pytz` library (for timezone handling, installed automatically by setup.sh)
+
+**Optional:**
+- FFmpeg (for video overlay merging and multi-snap joining)
 
 ## File Structure
 
@@ -414,6 +468,8 @@ and resume at any time!
 - **File timestamps are set to match the original capture date**, so when you
   sort by date modified in Finder/Explorer, you'll see them in chronological
   order by when they were taken, not when they were downloaded
+- **With `--local-timezone` flag**: EXIF metadata shows local time of capture,
+  not UTC. This helps photo libraries display memories with correct local timestamps.
 
 ---
 

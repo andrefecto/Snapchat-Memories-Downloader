@@ -55,6 +55,16 @@ except ImportError:
     print("Install with: pip install -r requirements.txt")
     piexif = None  # Setting to None allows feature checks
 
+# Timezone dependencies - optional for enhanced metadata
+try:
+    from timezonefinder import TimezoneFinder
+    import pytz
+    timezone_support = True
+except ImportError:
+    print("Warning: timezonefinder/pytz not found. Timezone-aware metadata will be disabled.")
+    print("Install with: pip install -r requirements.txt")
+    timezone_support = False
+
 # Check if ffmpeg is available for video overlay merging
 # Note: ffmpeg must be installed separately (not a Python package)
 try:
@@ -192,6 +202,100 @@ def is_zip_file(content: bytes) -> bool:
     return content[:2] == b'PK'
 
 
+def get_timezone_from_gps(latitude: float, longitude: float) -> str:
+    """
+    Determine timezone from GPS coordinates using timezonefinder.
+    
+    Special handling for Czech Republic to use Europe/Prague instead of Europe/Paris
+    which timezonefinder sometimes returns for border areas.
+    
+    Args:
+        latitude: GPS latitude coordinate
+        longitude: GPS longitude coordinate
+        
+    Returns:
+        Timezone string (e.g., 'Europe/Prague', 'America/New_York') or 'UTC' as fallback
+    """
+    if not timezone_support:
+        return "UTC"
+        
+    try:
+        tf = TimezoneFinder()
+        timezone_str = tf.timezone_at(lat=latitude, lng=longitude)
+        
+        # Special case: Czech Republic coordinates should use Prague timezone
+        # Bounding box for Czech Republic: lat 48.5-51.1, lng 12.0-18.9
+        if (timezone_str == "Europe/Paris" and 
+            48.5 <= latitude <= 51.1 and 
+            12.0 <= longitude <= 18.9):
+            timezone_str = "Europe/Prague"
+        
+        return timezone_str or "UTC"
+        
+    except Exception as e:
+        print(f"    Warning: Could not determine timezone for {latitude}, {longitude}: {e}")
+        return "UTC"
+
+
+def convert_utc_to_local(utc_string: str, timezone_str: str) -> datetime:
+    """
+    Convert UTC datetime string to local timezone-aware datetime.
+    
+    Args:
+        utc_string: UTC datetime string in format "2025-12-12 01:08:38 UTC"
+        timezone_str: Target timezone string (e.g., 'Europe/Prague')
+        
+    Returns:
+        Timezone-aware datetime object in local time
+    """
+    if not timezone_support:
+        # Fallback: return naive UTC datetime
+        try:
+            return datetime.strptime(utc_string, "%Y-%m-%d %H:%M:%S UTC")
+        except ValueError:
+            return datetime.utcnow()
+    
+    try:
+        # Parse UTC string
+        dt_utc = datetime.strptime(utc_string, "%Y-%m-%d %H:%M:%S UTC")
+        
+        # Convert to timezone-aware objects
+        utc_tz = pytz.UTC
+        local_tz = pytz.timezone(timezone_str)
+        
+        # Localize to UTC and convert to local timezone
+        dt_utc = utc_tz.localize(dt_utc)
+        dt_local = dt_utc.astimezone(local_tz)
+        
+        return dt_local
+        
+    except Exception as e:
+        print(f"    Warning: Error converting time '{utc_string}' to {timezone_str}: {e}")
+        # Fallback: use UTC
+        try:
+            dt_utc = datetime.strptime(utc_string, "%Y-%m-%d %H:%M:%S UTC")
+            return pytz.UTC.localize(dt_utc)
+        except Exception:
+            return pytz.UTC.localize(datetime.utcnow())
+
+
+def format_exif_datetime(dt: datetime) -> str:
+    """Format datetime for EXIF metadata (YYYY:MM:DD HH:MM:SS format)."""
+    return dt.strftime("%Y:%m:%d %H:%M:%S")
+
+
+def format_exif_offset(dt: datetime) -> str:
+    """
+    Format timezone offset for EXIF metadata (+01:00 or -05:00 format).
+    
+    Modern EXIF standard uses ISO 8601 offset format with colon separator.
+    """
+    offset = dt.strftime("%z")  # Returns "+0100" or "-0500"
+    if len(offset) == 5:  # "+0100"
+        return f"{offset[:3]}:{offset[3:]}"  # "+01:00"
+    return offset
+
+
 def decimal_to_dms(decimal: float) -> tuple:
     """
     Convert decimal coordinates to degrees, minutes, seconds (DMS) format for EXIF.
@@ -229,7 +333,8 @@ def add_exif_metadata(
     image_data: bytes,
     date_str: str,
     latitude: str,
-    longitude: str
+    longitude: str,
+    use_local_timezone: bool = False
 ) -> bytes:
     """
     Add EXIF metadata (GPS coordinates + timestamp) to image data.
@@ -243,7 +348,7 @@ def add_exif_metadata(
 
     EXIF structure:
     - "0th" IFD: General image data (DateTime)
-    - "Exif" IFD: Extended data (DateTimeOriginal, DateTimeDigitized)
+    - "Exif" IFD: Extended data (DateTimeOriginal, DateTimeDigitized, OffsetTime*)
     - "GPS" IFD: GPS coordinates in DMS format + direction refs (N/S, E/W)
 
     Args:
@@ -251,6 +356,7 @@ def add_exif_metadata(
         date_str: Snapchat date string (e.g., "2025-11-30 00:31:09 UTC")
         latitude: Latitude as string (e.g., "34.052235")
         longitude: Longitude as string (e.g., "-118.243683")
+        use_local_timezone: If True, convert UTC to local timezone and add modern EXIF offset tags
 
     Returns:
         Image bytes with EXIF embedded, or original bytes if EXIF fails
@@ -270,8 +376,34 @@ def add_exif_metadata(
         # Create EXIF dict with 3 IFDs (Image File Directories)
         exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
 
-        # Add date/time
-        if date_str and date_str != 'Unknown':
+        # Handle timezone conversion if requested
+        if use_local_timezone and timezone_support and date_str and date_str != 'Unknown':
+            if lat is not None and lon is not None:
+                # Get local timezone and convert UTC time
+                timezone_str = get_timezone_from_gps(lat, lon)
+                local_datetime = convert_utc_to_local(date_str, timezone_str)
+                
+                # Format for EXIF with modern offset tags
+                exif_date = format_exif_datetime(local_datetime)
+                offset_str = format_exif_offset(local_datetime)
+                
+                # Add date/time with timezone information
+                exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date.encode()
+                exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_date.encode()
+                exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_date.encode()
+                
+                # Modern EXIF timezone offset tags (EXIF 2.31+)
+                exif_dict["Exif"][piexif.ExifIFD.OffsetTime] = offset_str.encode()           # for DateTime
+                exif_dict["Exif"][piexif.ExifIFD.OffsetTimeOriginal] = offset_str.encode()   # for DateTimeOriginal  
+                exif_dict["Exif"][piexif.ExifIFD.OffsetTimeDigitized] = offset_str.encode()  # for DateTimeDigitized
+                
+                print(f"    Timezone-aware EXIF: {exif_date} {offset_str} (timezone: {timezone_str})")
+            else:
+                # No GPS coordinates, fall back to UTC
+                use_local_timezone = False
+        
+        # Fallback to UTC time handling (original behavior)
+        if not use_local_timezone and date_str and date_str != 'Unknown':
             # Parse Snapchat date: "2025-11-30 00:31:09 UTC"
             date_clean = date_str.replace(' UTC', '')
             try:
@@ -327,6 +459,109 @@ def add_exif_metadata(
     except Exception as e:
         print(f"    Warning: Could not add EXIF metadata: {e}")
         return image_data
+
+
+def update_video_metadata(
+    video_path: Path,
+    date_str: str,
+    latitude: str = 'Unknown',
+    longitude: str = 'Unknown',
+    use_local_timezone: bool = False
+) -> bool:
+    """
+    Update video metadata using FFmpeg with timezone-aware timestamps and GPS coordinates.
+    
+    Adds creation_time metadata with proper timezone handling and GPS location data
+    in multiple formats for maximum compatibility across different video players.
+    
+    Args:
+        video_path: Path to video file
+        date_str: Snapchat date string (e.g., "2025-11-30 00:31:09 UTC")
+        latitude: Latitude as string (e.g., "34.052235") 
+        longitude: Longitude as string (e.g., "-118.243683")
+        use_local_timezone: If True, convert UTC to local timezone
+        
+    Returns:
+        True if metadata update successful, False otherwise
+    """
+    if not ffmpeg_available:
+        print(f"    Warning: FFmpeg not available, skipping video metadata for {video_path.name}")
+        return False
+        
+    try:
+        # Parse coordinates
+        lat = float(latitude) if latitude != 'Unknown' else None
+        lon = float(longitude) if longitude != 'Unknown' else None
+        
+        # Handle timezone conversion
+        if use_local_timezone and timezone_support and lat is not None and lon is not None:
+            timezone_str = get_timezone_from_gps(lat, lon)
+            local_datetime = convert_utc_to_local(date_str, timezone_str)
+            creation_time = local_datetime.isoformat()  # ISO 8601 with timezone
+        else:
+            # Fallback to UTC
+            date_clean = date_str.replace(' UTC', '')
+            try:
+                dt = datetime.strptime(date_clean, '%Y-%m-%d %H:%M:%S')
+                creation_time = dt.isoformat() + 'Z'  # UTC format
+            except ValueError:
+                print(f"    Warning: Could not parse date '{date_str}' for video metadata")
+                return False
+        
+        # Create backup
+        backup_path = video_path.with_suffix(video_path.suffix + '.backup')
+        video_path.rename(backup_path)
+        
+        # Build FFmpeg command
+        cmd = [
+            "ffmpeg", "-i", str(backup_path),
+            "-metadata", f"creation_time={creation_time}",
+        ]
+        
+        # Add GPS metadata if available
+        if lat is not None and lon is not None:
+            # Multiple location formats for compatibility
+            cmd.extend([
+                "-metadata", f"location={lat:+.6f}{lon:+.6f}/",  # ISO 6709 format
+                "-metadata", f"location-eng={lat}, {lon}",       # Human readable
+                "-metadata", f"com.apple.quicktime.location.ISO6709={lat:+08.4f}{lon:+09.4f}/",  # Apple format
+            ])
+        
+        cmd.extend([
+            "-codec", "copy",  # Copy streams without re-encoding
+            "-y",  # Overwrite output
+            str(video_path)
+        ])
+        
+        # Run FFmpeg
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,  # 1 minute timeout for metadata-only operation
+            check=False
+        )
+        
+        if result.returncode == 0:
+            # Success - remove backup
+            backup_path.unlink()
+            gps_info = f", GPS: {lat}, {lon}" if lat and lon else ""
+            print(f"    Updated video metadata: {creation_time}{gps_info}")
+            return True
+        else:
+            # Error - restore backup
+            backup_path.rename(video_path)
+            error_msg = result.stderr.decode('utf-8', errors='ignore')
+            print(f"    Warning: FFmpeg error updating video metadata: {error_msg[-200:]}")
+            return False
+            
+    except Exception as e:
+        # Restore backup if it exists
+        backup_path = video_path.with_suffix(video_path.suffix + '.backup')
+        if backup_path.exists():
+            backup_path.rename(video_path)
+        print(f"    Warning: Error updating video metadata for {video_path.name}: {e}")
+        return False
 
 
 def merge_image_overlay(main_data: bytes, overlay_data: bytes) -> bytes:
@@ -495,7 +730,8 @@ def download_and_extract(
     longitude: str = 'Unknown',
     overlays_only: bool = False,
     use_timestamp_filenames: bool = False,
-    check_duplicates: bool = False
+    check_duplicates: bool = False,
+    use_local_timezone: bool = False
 ) -> list:
     """
     Download and process a single memory file from Snapchat CDN.
@@ -530,6 +766,7 @@ def download_and_extract(
         overlays_only: If True, skip files without overlays
         use_timestamp_filenames: If True, use YYYY.MM.DD-HH:MM:SS.ext naming
         check_duplicates: If True, skip download if identical file exists
+        use_local_timezone: If True, convert UTC to local timezone in EXIF/metadata
 
     Returns:
         List of dicts with file info: [{'path': str, 'size': int, 'type': str}]
@@ -596,7 +833,9 @@ def download_and_extract(
                         merged_data = merge_image_overlay(main_file, overlay_file)
 
                         # Add EXIF metadata to merged image
-                        merged_data = add_exif_metadata(merged_data, date_str, latitude, longitude)
+                        merged_data = add_exif_metadata(
+                            merged_data, date_str, latitude, longitude, use_local_timezone
+                        )
 
                         # Check for duplicates
                         is_dup, dup_file = is_duplicate_file(merged_data, base_path, check_duplicates)
@@ -647,6 +886,10 @@ def download_and_extract(
                         success = merge_video_overlay(temp_main, temp_overlay, output_path)
 
                         if success:
+                            # Update video metadata with timezone support
+                            if use_local_timezone:
+                                update_video_metadata(output_path, date_str, latitude, longitude, use_local_timezone)
+
                             files_saved.append({
                                 'path': output_filename,
                                 'size': output_path.stat().st_size,
@@ -706,7 +949,9 @@ def download_and_extract(
                     # Add EXIF metadata to images (preserves original format)
                     is_image_file = file_ext.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.tif']
                     if is_image_file:
-                        file_data = add_exif_metadata(file_data, date_str, latitude, longitude)
+                        file_data = add_exif_metadata(
+                            file_data, date_str, latitude, longitude, use_local_timezone
+                        )
 
                     # Check for duplicates
                     is_dup, dup_file = is_duplicate_file(file_data, base_path, check_duplicates)
@@ -733,6 +978,11 @@ def download_and_extract(
 
                         with open(output_path, 'wb') as f:
                             f.write(file_data)
+
+                        # Update video metadata if applicable
+                        is_video_file = file_ext.lower() in ['.mp4', '.mov', '.avi']
+                        if is_video_file and use_local_timezone:
+                            update_video_metadata(output_path, date_str, latitude, longitude, use_local_timezone)
 
                         # Set file timestamp to match original Snapchat date
                         timestamp = parse_date_to_timestamp(date_str)
@@ -769,7 +1019,7 @@ def download_and_extract(
         # Add EXIF metadata to images
         is_image = extension.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.tif']
         if is_image:
-            content = add_exif_metadata(content, date_str, latitude, longitude)
+            content = add_exif_metadata(content, date_str, latitude, longitude, use_local_timezone)
 
         # Check for duplicates
         is_dup, dup_file = is_duplicate_file(content, base_path, check_duplicates)
@@ -788,6 +1038,10 @@ def download_and_extract(
 
             with open(output_path, 'wb') as f:
                 f.write(content)
+
+            # Update video metadata if applicable
+            if is_video and use_local_timezone:
+                update_video_metadata(output_path, date_str, latitude, longitude, use_local_timezone)
 
             files_saved.append({
                 'path': output_filename,
@@ -1335,7 +1589,8 @@ def download_all_memories(
     overlays_only: bool = False,
     use_timestamp_filenames: bool = False,
     remove_duplicates: bool = False,
-    join_multi_snaps: bool = False
+    join_multi_snaps: bool = False,
+    use_local_timezone: bool = False
 ) -> None:
     """Download all memories with sequential naming and metadata preservation.
 
@@ -1346,6 +1601,9 @@ def download_all_memories(
     to prevent re-downloading and save bandwidth/disk space immediately.
 
     If join_multi_snaps is True, videos taken within 10 seconds are automatically joined.
+
+    If use_local_timezone is True, EXIF metadata includes timezone-aware timestamps
+    based on GPS coordinates, and video metadata is updated with local time.
     """
 
     # Parse HTML to get all memories
@@ -1361,6 +1619,18 @@ def download_all_memories(
 
     # Initialize or load metadata
     metadata_list = initialize_metadata(memories, output_path)
+
+    # Show timezone support status
+    if use_local_timezone:
+        if timezone_support:
+            print("✓ Timezone-aware metadata enabled")
+            print("  EXIF timestamps will be converted to local time based on GPS coordinates")
+            print("  Video metadata will include timezone information")
+        else:
+            print("⚠ Warning: Timezone support disabled (missing timezonefinder/pytz)")
+            print("  Install with: pip install -r requirements.txt")
+            print("  Falling back to UTC timestamps")
+            use_local_timezone = False
 
     # Determine which items to download
     if videos_only:
@@ -1427,7 +1697,8 @@ def download_all_memories(
                 metadata['date'], metadata['latitude'], metadata['longitude'],
                 overlays_only,
                 use_timestamp_filenames,
-                remove_duplicates
+                remove_duplicates,
+                use_local_timezone
             )
 
             # Check if file was skipped due to overlays_only mode
@@ -1504,6 +1775,14 @@ def download_all_memories(
                     success = merge_video_overlay(main_file, overlay_file, merged_file)
 
                     if success:
+                        # Update video metadata with timezone support
+                        if use_local_timezone:
+                            update_video_metadata(
+                                merged_file, metadata['date'], 
+                                metadata['latitude'], metadata['longitude'], 
+                                use_local_timezone
+                            )
+
                         # Update metadata to reflect merged file
                         metadata['files'] = [{
                             'path': output_filename,
@@ -1573,6 +1852,9 @@ def download_all_memories(
     if pending > 0:
         print("\nTo resume incomplete downloads, run:")
         print("  python download_memories.py --resume")
+    if use_local_timezone and timezone_support:
+        print("\nTimezone-aware metadata has been embedded in all images and videos!")
+        print("Photos should now display with correct local timestamps in your photo library.")
 
 
 if __name__ == '__main__':
@@ -1654,6 +1936,11 @@ if __name__ == '__main__':
         action='store_true',
         help='Automatically detect and join multi-snap videos (videos taken within 10 seconds of each other)'
     )
+    parser.add_argument(
+        '--local-timezone',
+        action='store_true',
+        help='Enable timezone-aware EXIF metadata based on GPS coordinates (requires timezonefinder and pytz)'
+    )
 
     args = parser.parse_args()
 
@@ -1690,6 +1977,7 @@ if __name__ == '__main__':
     timestamp_filenames_mode = args.timestamp_filenames
     remove_duplicates_mode = args.remove_duplicates
     join_multi_snaps_mode = args.join_multi_snaps
+    local_timezone_mode = args.local_timezone
 
     # Optional: limit number of downloads for testing
     # Pass --test to download only first 3 files
@@ -1727,7 +2015,8 @@ if __name__ == '__main__':
                     metadata['date'], metadata['latitude'], metadata['longitude'],
                     False,  # overlays_only not used in test mode
                     timestamp_filenames_mode,
-                    remove_duplicates_mode
+                    remove_duplicates_mode,
+                    local_timezone_mode
                 )
 
                 if len(files_saved) > 1:
@@ -1777,5 +2066,6 @@ if __name__ == '__main__':
             overlays_only=overlays_only_mode,
             use_timestamp_filenames=timestamp_filenames_mode,
             remove_duplicates=remove_duplicates_mode,
-            join_multi_snaps=join_multi_snaps_mode
+            join_multi_snaps=join_multi_snaps_mode,
+            use_local_timezone=local_timezone_mode
         )
