@@ -1589,7 +1589,7 @@ def download_all_memories(
     overlays_only: bool = False,
     use_timestamp_filenames: bool = False,
     remove_duplicates: bool = False,
-    join_multi_snaps: bool = False,
+    should_join_multi_snaps: bool = False,
     use_local_timezone: bool = False
 ) -> None:
     """Download all memories with sequential naming and metadata preservation.
@@ -1600,7 +1600,7 @@ def download_all_memories(
     If remove_duplicates is True, duplicate files are detected during download (before saving)
     to prevent re-downloading and save bandwidth/disk space immediately.
 
-    If join_multi_snaps is True, videos taken within 10 seconds are automatically joined.
+    If should_join_multi_snaps is True, videos taken within 10 seconds are automatically joined.
 
     If use_local_timezone is True, EXIF metadata includes timezone-aware timestamps
     based on GPS coordinates, and video metadata is updated with local time.
@@ -1829,7 +1829,7 @@ def download_all_memories(
     # This prevents re-downloading and saves bandwidth/disk space immediately
 
     # Join multi-snaps if requested
-    if join_multi_snaps:
+    if should_join_multi_snaps:
         join_multi_snaps(output_path)
 
     # Summary
@@ -2066,6 +2066,6 @@ if __name__ == '__main__':
             overlays_only=overlays_only_mode,
             use_timestamp_filenames=timestamp_filenames_mode,
             remove_duplicates=remove_duplicates_mode,
-            join_multi_snaps=join_multi_snaps_mode,
+            should_join_multi_snaps=join_multi_snaps_mode,
             use_local_timezone=local_timezone_mode
         )
