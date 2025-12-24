@@ -902,7 +902,7 @@ def download_and_extract(
                             print(f"    Merged video: {output_filename}")
 
                             # Set file timestamp to match original Snapchat date
-                            timestamp = parse_date_to_timestamp(date_str)
+                            timestamp = parse_date_to_timestamp(date_str, use_local_timezone, latitude, longitude)
                             set_file_timestamp(output_path, timestamp)
 
                             # Delete any previously saved -main/-overlay files
@@ -989,7 +989,7 @@ def download_and_extract(
                             update_video_metadata(output_path, date_str, latitude, longitude, use_local_timezone)
 
                         # Set file timestamp to match original Snapchat date
-                        timestamp = parse_date_to_timestamp(date_str)
+                        timestamp = parse_date_to_timestamp(date_str, use_local_timezone, latitude, longitude)
                         set_file_timestamp(output_path, timestamp)
 
                         file_info_dict = {
@@ -1064,17 +1064,51 @@ def get_file_extension(media_type: str) -> str:
     return '.jpg'
 
 
-def parse_date_to_timestamp(date_str: str) -> Optional[float]:
+def parse_date_to_timestamp(date_str: str, use_local_timezone: bool = False,
+                           latitude: str = 'Unknown', longitude: str = 'Unknown') -> Optional[float]:
     """
     Parse Snapchat date string to Unix timestamp.
-    Format: "2025-11-30 00:31:09 UTC"
+
+    CRITICAL: Snapchat dates are always in UTC format: "2025-11-30 00:31:09 UTC"
+    This function must parse them as UTC, not local time!
+
+    Args:
+        date_str: Snapchat UTC date string (e.g., "2025-11-30 00:31:09 UTC")
+        use_local_timezone: If True, convert to local timezone based on GPS coordinates
+        latitude: GPS latitude (required if use_local_timezone=True)
+        longitude: GPS longitude (required if use_local_timezone=True)
+
+    Returns:
+        Unix timestamp (seconds since epoch)
     """
     try:
         # Remove " UTC" suffix and parse
         date_str_clean = date_str.replace(' UTC', '')
-        dt = datetime.strptime(date_str_clean, '%Y-%m-%d %H:%M:%S')
-        # Convert to timestamp
-        return dt.timestamp()
+
+        # CRITICAL: Must parse as UTC, not local time!
+        # Using datetime.fromisoformat() with 'Z' suffix would be cleaner, but Snapchat format
+        # doesn't use ISO 8601, so we need to manually set UTC timezone
+        from datetime import timezone
+        dt_utc = datetime.strptime(date_str_clean, '%Y-%m-%d %H:%M:%S')
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+        # If local timezone conversion requested, convert based on GPS coordinates
+        if use_local_timezone and timezone_support:
+            try:
+                lat = float(latitude) if latitude != 'Unknown' else None
+                lon = float(longitude) if longitude != 'Unknown' else None
+
+                if lat is not None and lon is not None:
+                    # Get local timezone and convert
+                    timezone_str = get_timezone_from_gps(lat, lon)
+                    local_datetime = convert_utc_to_local(date_str, timezone_str)
+                    return local_datetime.timestamp()
+            except (ValueError, TypeError):
+                pass  # Fall through to UTC timestamp
+
+        # Return UTC timestamp
+        return dt_utc.timestamp()
+
     except (ValueError, AttributeError) as e:
         print(f"    Warning: Could not parse date '{date_str}': {e}")
         return None
@@ -1427,6 +1461,173 @@ def join_multi_snaps(folder_path: Path, time_threshold_seconds: int = 10) -> dic
     }
 
 
+def update_existing_timezone_metadata(folder_path: str) -> None:
+    """
+    Update timezone metadata for already-downloaded files based on GPS coordinates.
+    Reads metadata.json and updates:
+    - File modification timestamps (converts UTC to local time)
+    - EXIF metadata in images (adds timezone-aware timestamps)
+    - Video metadata (adds timezone-aware creation time)
+
+    Args:
+        folder_path: Path to folder containing downloaded files and metadata.json
+    """
+    folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        print(f"Error: {folder_path} is not a valid directory!")
+        return
+
+    metadata_file = folder / 'metadata.json'
+    if not metadata_file.exists():
+        print(f"Error: metadata.json not found in {folder_path}!")
+        print("This command only works on folders that were created by this script.")
+        return
+
+    if not timezone_support:
+        print("Error: Timezone support not available!")
+        print("Install required packages: pip install timezonefinder pytz")
+        return
+
+    print("=" * 60)
+    print("Updating timezone metadata for existing files...")
+    print("=" * 60)
+
+    # Load metadata
+    with open(metadata_file, 'r', encoding='utf-8') as f:
+        metadata_list = json.load(f)
+
+    updated_images = 0
+    updated_videos = 0
+    updated_timestamps = 0
+    errors = 0
+
+    for metadata in metadata_list:
+        if metadata.get('status') != 'success':
+            continue
+
+        files = metadata.get('files', [])
+        if not files:
+            continue
+
+        date_str = metadata.get('date', 'Unknown')
+        latitude = metadata.get('latitude', 'Unknown')
+        longitude = metadata.get('longitude', 'Unknown')
+
+        # Skip if no GPS coordinates
+        if latitude == 'Unknown' or longitude == 'Unknown':
+            continue
+
+        try:
+            lat = float(latitude)
+            lon = float(longitude)
+        except (ValueError, TypeError):
+            continue
+
+        # Get timezone for this location
+        timezone_str = get_timezone_from_gps(lat, lon)
+        local_datetime = convert_utc_to_local(date_str, timezone_str)
+        local_timestamp = local_datetime.timestamp()
+
+        print(f"\n#{metadata['number']} - {date_str}")
+        print(f"  Location: {lat}, {lon}")
+        print(f"  Timezone: {timezone_str}")
+        print(f"  Local time: {format_exif_datetime(local_datetime)} {format_exif_offset(local_datetime)}")
+
+        for file_info in files:
+            file_path = folder / file_info['path']
+
+            if not file_path.exists():
+                print(f"  WARNING: File not found: {file_info['path']}")
+                continue
+
+            file_ext = file_path.suffix.lower()
+            is_image = file_ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.tif']
+            is_video = file_ext in ['.mp4', '.mov', '.avi']
+
+            try:
+                # Update EXIF for images
+                if is_image and piexif is not None and Image is not None:
+                    with open(file_path, 'rb') as f:
+                        image_data = f.read()
+
+                    # Load image
+                    img = Image.open(io.BytesIO(image_data))
+                    original_format = img.format
+
+                    # Create EXIF dict
+                    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
+
+                    # Add timezone-aware datetime
+                    exif_date = format_exif_datetime(local_datetime)
+                    offset_str = format_exif_offset(local_datetime)
+
+                    exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_date.encode()
+                    exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_date.encode()
+                    exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_date.encode()
+                    exif_dict["Exif"][piexif.ExifIFD.OffsetTime] = offset_str.encode()
+                    exif_dict["Exif"][piexif.ExifIFD.OffsetTimeOriginal] = offset_str.encode()
+                    exif_dict["Exif"][piexif.ExifIFD.OffsetTimeDigitized] = offset_str.encode()
+
+                    # Add GPS coordinates
+                    lat_dms = decimal_to_dms(lat)
+                    lon_dms = decimal_to_dms(lon)
+                    exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = lat_dms
+                    exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = b'N' if lat >= 0 else b'S'
+                    exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = lon_dms
+                    exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = b'E' if lon >= 0 else b'W'
+
+                    # Save with EXIF
+                    exif_bytes = piexif.dump(exif_dict)
+                    output = io.BytesIO()
+
+                    if original_format in ['JPEG', 'JPG']:
+                        if img.mode == 'RGBA':
+                            img = img.convert('RGB')
+                        img.save(output, format='JPEG', quality=95, exif=exif_bytes)
+                    elif original_format == 'PNG':
+                        try:
+                            img.save(output, format='PNG', exif=exif_bytes)
+                        except Exception:
+                            img.save(output, format='PNG')
+                    elif original_format == 'WEBP':
+                        img.save(output, format='WEBP', quality=95, exif=exif_bytes)
+                    else:
+                        # Skip unsupported formats
+                        print(f"  Skipping {file_path.name} (format: {original_format})")
+                        continue
+
+                    # Write back to file
+                    with open(file_path, 'wb') as f:
+                        f.write(output.getvalue())
+
+                    print(f"  ✓ Updated EXIF: {file_path.name}")
+                    updated_images += 1
+
+                # Update metadata for videos
+                elif is_video:
+                    success = update_video_metadata(file_path, date_str, latitude, longitude, use_local_timezone=True)
+                    if success:
+                        updated_videos += 1
+
+                # Update file timestamp
+                os.utime(file_path, (local_timestamp, local_timestamp))
+                print(f"  ✓ Updated timestamp: {file_path.name}")
+                updated_timestamps += 1
+
+            except Exception as e:
+                print(f"  ERROR updating {file_path.name}: {e}")
+                errors += 1
+
+    print("\n" + "=" * 60)
+    print("Update complete!")
+    print(f"  Images updated: {updated_images}")
+    print(f"  Videos updated: {updated_videos}")
+    print(f"  File timestamps updated: {updated_timestamps}")
+    if errors > 0:
+        print(f"  Errors: {errors}")
+    print("=" * 60)
+
+
 def initialize_metadata(memories: list, output_path: Path) -> list:
     """
     Initialize metadata for all memories with pending status.
@@ -1740,7 +1941,10 @@ def download_all_memories(
                     )
 
                 # Set file timestamp to match the original date
-                timestamp = parse_date_to_timestamp(metadata['date'])
+                timestamp = parse_date_to_timestamp(
+                    metadata['date'], use_local_timezone,
+                    metadata.get('latitude', 'Unknown'), metadata.get('longitude', 'Unknown')
+                )
                 if timestamp:
                     for file_info in files_saved:
                         file_path = output_path / file_info['path']
@@ -1806,7 +2010,10 @@ def download_all_memories(
                         f"({downloaded_file['size']:,} bytes)"
                     )
 
-                timestamp = parse_date_to_timestamp(metadata['date'])
+                timestamp = parse_date_to_timestamp(
+                    metadata['date'], use_local_timezone,
+                    metadata.get('latitude', 'Unknown'), metadata.get('longitude', 'Unknown')
+                )
                 if timestamp:
                     for file_info in files_saved:
                         file_path = output_path / file_info['path']
@@ -1923,7 +2130,10 @@ def download_all_memories(
                         }]
 
                         # Set timestamp
-                        timestamp = parse_date_to_timestamp(metadata['date'])
+                        timestamp = parse_date_to_timestamp(
+                            metadata['date'], use_local_timezone,
+                            metadata.get('latitude', 'Unknown'), metadata.get('longitude', 'Unknown')
+                        )
                         if timestamp:
                             set_file_timestamp(merged_file, timestamp)
 
@@ -2080,12 +2290,23 @@ if __name__ == '__main__':
         action='store_true',
         help='Enable timezone-aware EXIF metadata based on GPS coordinates (requires timezonefinder and pytz)'
     )
+    parser.add_argument(
+        '--update-timezone',
+        type=str,
+        metavar='FOLDER',
+        help='Update timezone metadata for already-downloaded files (requires timezonefinder and pytz)'
+    )
 
     args = parser.parse_args()
 
     # Handle --merge-existing mode (separate from normal download mode)
     if args.merge_existing:
         merge_existing_files(args.merge_existing)
+        sys.exit(0)
+
+    # Handle --update-timezone mode (separate from normal download mode)
+    if args.update_timezone:
+        update_existing_timezone_metadata(args.update_timezone)
         sys.exit(0)
 
     html_path = args.html_file
@@ -2171,7 +2392,10 @@ if __name__ == '__main__':
                     )
 
                 # Set file timestamp to match the original date
-                timestamp = parse_date_to_timestamp(metadata['date'])
+                timestamp = parse_date_to_timestamp(
+                    metadata['date'], local_timezone_mode,
+                    metadata.get('latitude', 'Unknown'), metadata.get('longitude', 'Unknown')
+                )
                 if timestamp:
                     for file_info in files_saved:
                         file_path = output_path / file_info['path']
