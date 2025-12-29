@@ -218,6 +218,7 @@ python download_memories.py --local-timezone
 **Example:**
 
 If a photo was taken at 15:30 UTC in New York (EST = UTC-5), it will be stored as:
+
 - EXIF timestamp: `2024:12:15 10:30:00`
 - EXIF offset: `-05:00`
 
@@ -443,6 +444,7 @@ For merged overlays (when using `--merge-overlays` flag):
 - `pytz` library (for timezone handling, installed automatically by setup.sh)
 
 **Optional:**
+
 - FFmpeg (for video overlay merging and multi-snap joining)
 
 ## File Structure
