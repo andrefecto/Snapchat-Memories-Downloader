@@ -828,7 +828,25 @@
         </p>
 
         <h3 style="margin-top: 20px; color: #667eea">
-          Videos are still coming out black with audio - what should I do?
+          Videos downloaded successfully but won't play on Windows - need HEVC codec?
+        </h3>
+        <p>
+          <strong>Problem:</strong> Many Snapchat videos use HEVC (H.265) codec, which Windows doesn't include by default.
+        </p>
+        <p style="margin-top: 10px;">
+          <strong>Solution - Install HEVC Codec (FREE):</strong>
+        </p>
+        <ol style="margin-left: 20px; margin-top: 5px;">
+          <li><strong>Free Method:</strong> Install "HEVC Video Extensions from Device Manufacturer" from <a href="https://apps.microsoft.com/detail/9n4wgh0z6vhq" target="_blank" style="color: #667eea; font-weight: 600;">Microsoft Store</a> (FREE)</li>
+          <li><strong>Alternative:</strong> Use VLC Media Player (<a href="https://www.videolan.org/vlc/" target="_blank" style="color: #667eea;">vlc.org</a>) - plays HEVC without codec installation</li>
+          <li><strong>Verify:</strong> Right-click video → Properties → Details tab → check "Video codec" shows HEVC/H265</li>
+        </ol>
+        <p style="margin-top: 10px;">
+          <strong>Note:</strong> This is NOT a bug with the downloader - the videos are downloading correctly. It's a Windows limitation.
+        </p>
+
+        <h3 style="margin-top: 20px; color: #667eea">
+          Videos are coming out black with audio - what should I do?
         </h3>
         <p>
           <strong>Recent Fix:</strong> The tool now automatically converts WebP/JPEG/etc overlays to PNG before processing, which fixes most black screen issues.

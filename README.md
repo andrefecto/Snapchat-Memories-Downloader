@@ -517,6 +517,20 @@ If this tool helped you recover your memories, consider [buying me a coffee](htt
 
 ## 🔧 Troubleshooting
 
+### Videos Won't Play on Windows - Need HEVC Codec?
+
+**Problem:** Videos download successfully but won't play in Windows Media Player or Photos app.
+
+**Cause:** Many Snapchat videos (especially from iPhones) use HEVC (H.265) codec, which Windows doesn't include by default.
+
+**Solution:**
+
+1. **Free Method (Recommended):** Install "HEVC Video Extensions from Device Manufacturer" from [Microsoft Store](https://apps.microsoft.com/detail/9n4wgh0z6vhq) (FREE)
+2. **Alternative:** Install [VLC Media Player](https://www.videolan.org/vlc/) - plays HEVC videos without codec installation
+3. **Verify:** Right-click video → Properties → Details tab → check if "Video codec" shows HEVC or H265
+
+**Note:** This is NOT a bug with the downloader - the videos are downloading correctly. It's a Windows limitation that requires the HEVC codec to be installed separately.
+
 ### Videos Download as Blank/Black Files
 
 If your videos are downloading but show as blank or black when you try to play them:
