@@ -577,10 +577,14 @@ def update_video_metadata(
             return False
             
     except Exception as e:
-        # Restore backup if it exists
-        backup_path = video_path.with_suffix(video_path.suffix + '.backup')
-        if backup_path.exists():
-            backup_path.rename(video_path)
+        # Restore backup if it exists (only if we got far enough to create it)
+        try:
+            backup_path = video_path.with_suffix(video_path.suffix + '.backup')
+            if backup_path.exists():
+                backup_path.rename(video_path)
+        except:
+            # backup_path might not be defined if exception occurred early
+            pass
         print(f"    Warning: Error updating video metadata for {video_path.name}: {e}")
         return False
 

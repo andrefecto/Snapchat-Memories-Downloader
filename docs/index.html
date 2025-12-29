@@ -1049,7 +1049,7 @@
      */
     async function initFFmpeg(forceReload = false) {
       // Check if we need to reset due to memory concerns
-      const resetInterval = parseInt(document.getElementById('ffmpegResetIntervalSelect')?.value || '5');
+      const resetInterval = parseInt(document.getElementById('ffmpegResetIntervalSelect')?.value || '5', 10);
 
       if (forceReload || (videosProcessedSinceReset >= resetInterval && resetInterval < 999)) {
         if (ffmpegInstance) {
