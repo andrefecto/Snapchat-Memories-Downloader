@@ -1338,6 +1338,96 @@
     }
 
     /**
+     * Add GPS and timestamp metadata to video using FFmpeg.wasm
+     *
+     * Adds creation_time and GPS location metadata to MP4 files for compatibility
+     * with Apple Photos, Google Photos, and other media apps.
+     *
+     * Uses FFmpeg metadata flags similar to Python version:
+     * - creation_time: ISO 8601 timestamp in UTC
+     * - location: ISO 6709 format (e.g., "+34.0522-118.2437/")
+     * - location-eng: Human-readable format (e.g., "34.052235, -118.243683")
+     * - com.apple.quicktime.location.ISO6709: Apple-specific GPS format
+     *
+     * @param {ArrayBuffer} videoData - Video data (MP4)
+     * @param {string} dateStr - Date string from Snapchat (e.g., "2025-11-30 00:31:09 UTC")
+     * @param {string} latitude - Latitude as string (e.g., "34.052235")
+     * @param {string} longitude - Longitude as string (e.g., "-118.243683")
+     * @returns {Promise<ArrayBuffer>} - Video with metadata added
+     */
+    async function addVideoMetadata(videoData, dateStr, latitude, longitude) {
+      // Skip if no GPS coordinates available
+      if (!latitude || !longitude || latitude === "Unknown" || longitude === "Unknown") {
+        console.log("Skipping video metadata (no GPS coordinates)");
+        return videoData;
+      }
+
+      try {
+        const ffmpeg = await initFFmpeg();
+        if (!ffmpeg) {
+          console.warn("FFmpeg.wasm not available, skipping video metadata");
+          return videoData;
+        }
+
+        // Parse coordinates
+        const lat = parseFloat(latitude);
+        const lon = parseFloat(longitude);
+
+        if (isNaN(lat) || isNaN(lon)) {
+          console.warn("Invalid GPS coordinates, skipping video metadata");
+          return videoData;
+        }
+
+        // Parse date for creation_time metadata
+        let creationTime;
+        try {
+          const dateClean = dateStr.replace(" UTC", "");
+          const dt = new Date(dateClean + "Z"); // UTC
+          creationTime = dt.toISOString(); // ISO 8601 format with 'Z' suffix
+        } catch (e) {
+          console.warn("Could not parse date for video metadata:", dateStr);
+          return videoData; // Return original if date parsing fails
+        }
+
+        addLog(`  Adding GPS metadata to video (${lat.toFixed(4)}, ${lon.toFixed(4)})...`, "info");
+
+        // Write input video to FFmpeg virtual filesystem
+        await ffmpeg.writeFile("input.mp4", new Uint8Array(videoData));
+
+        // Build FFmpeg command - copy video streams, only update metadata (fast)
+        const args = [
+          "-i", "input.mp4",
+          "-metadata", `creation_time=${creationTime}`,
+          "-metadata", `location=${lat >= 0 ? '+' : ''}${lat.toFixed(6)}${lon >= 0 ? '+' : ''}${lon.toFixed(6)}/`,
+          "-metadata", `location-eng=${lat}, ${lon}`,
+          "-metadata", `com.apple.quicktime.location.ISO6709=${lat >= 0 ? '+' : ''}${lat.toFixed(4).padStart(8, '0')}${lon >= 0 ? '+' : ''}${lon.toFixed(4).padStart(9, '0')}/`,
+          "-codec", "copy",  // Copy streams without re-encoding (fast!)
+          "-y",              // Overwrite output
+          "output.mp4"
+        ];
+
+        addLog(`  Running FFmpeg metadata update (stream copy, no re-encode)...`, "info");
+        await ffmpeg.exec(args);
+
+        // Read output file
+        const outputData = await ffmpeg.readFile("output.mp4");
+        const outputBuffer = outputData.buffer;
+
+        // Clean up virtual filesystem
+        await ffmpeg.deleteFile("input.mp4");
+        await ffmpeg.deleteFile("output.mp4");
+
+        addLog(`  Video metadata added successfully`, "success");
+        return outputBuffer;
+
+      } catch (error) {
+        console.warn("Could not add video metadata:", error);
+        addLog(`  Warning: Failed to add video metadata: ${error.message}`, "warning");
+        return videoData; // Return original video on error
+      }
+    }
+
+    /**
      * Merge overlay image on top of main image using Canvas API
      * @param {ArrayBuffer} mainData - Main image data
      * @param {ArrayBuffer} overlayData - Overlay image data
@@ -2483,7 +2573,7 @@
             addLog(`  Merging video overlay (this may take a minute)...`, "info");
 
             // Merge videos using FFmpeg.wasm
-            const mergedData = await mergeVideoOverlay(
+            let mergedData = await mergeVideoOverlay(
               mainData,
               overlayData,
               (progress) => {
@@ -2491,6 +2581,14 @@
               },
               overlayIsImage,
               overlayExt
+            );
+
+            // Add GPS and timestamp metadata to merged video
+            mergedData = await addVideoMetadata(
+              mergedData,
+              metadata.date,
+              metadata.latitude,
+              metadata.longitude
             );
 
             const filename = generateFilename(metadata.date, extension, useTimestampFilenames, fileNum);
@@ -2838,7 +2936,7 @@
                     const overlayIsImage = ['png', 'jpg', 'jpeg'].includes(overlayExtNoDot);
 
                     // Merge videos using FFmpeg.wasm (supports image overlay)
-                    const mergedData = await mergeVideoOverlay(
+                    let mergedData = await mergeVideoOverlay(
                       mainData,
                       overlayData,
                       (progress) => {
@@ -2849,6 +2947,14 @@
                       },
                       overlayIsImage,
                       overlayExt
+                    );
+
+                    // Add GPS and timestamp metadata to merged video
+                    mergedData = await addVideoMetadata(
+                      mergedData,
+                      metadata.date,
+                      metadata.latitude,
+                      metadata.longitude
                     );
 
                     const filename = generateFilename(metadata.date, extension, useTimestampFilenames, fileNum);
@@ -2933,6 +3039,16 @@
                       ? `${baseNameNoExt}-overlay${origExt}`
                       : `${baseNameNoExt}-main${origExt}`;
 
+                    // Add GPS and timestamp metadata to main video file (not overlay)
+                    if (metadata.media_type === "Video" && !isOverlay) {
+                      fileData = await addVideoMetadata(
+                        fileData,
+                        metadata.date,
+                        metadata.latitude,
+                        metadata.longitude
+                      );
+                    }
+
                     // Store videos uncompressed (this is video merge fallback path)
                     zip.file(newFilename, fileData, { date: fileDate, compression: "STORE" });
                     metadata.files.push({
@@ -2984,6 +3100,16 @@
                       );
                     }
 
+                    // Add GPS and timestamp metadata to main video file (not overlay)
+                    if (metadata.media_type === "Video" && !isOverlay) {
+                      fileData = await addVideoMetadata(
+                        fileData,
+                        metadata.date,
+                        metadata.latitude,
+                        metadata.longitude
+                      );
+                    }
+
                     // Store videos uncompressed to prevent browser playback issues
                     // CRITICAL: Videos MUST use compression: "STORE" (no compression)
                     //
@@ -3028,6 +3154,16 @@
             // Add EXIF metadata to images
             if (metadata.media_type === "Image") {
               fileData = await addExifMetadata(
+                fileData,
+                metadata.date,
+                metadata.latitude,
+                metadata.longitude
+              );
+            }
+
+            // Add GPS and timestamp metadata to videos
+            if (metadata.media_type === "Video") {
+              fileData = await addVideoMetadata(
                 fileData,
                 metadata.date,
                 metadata.latitude,
