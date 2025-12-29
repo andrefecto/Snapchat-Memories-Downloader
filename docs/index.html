@@ -391,6 +391,80 @@
       color: #667eea;
       font-weight: 600;
     }
+
+    .options-group {
+      margin-top: 25px;
+      padding-top: 20px;
+      border-top: 1px solid #dee2e6;
+    }
+
+    .options-group-header {
+      font-size: 18px;
+      font-weight: 700;
+      color: #667eea;
+      margin-bottom: 15px;
+    }
+
+    details.collapsible {
+      margin-top: 20px;
+      border: 1px solid #dee2e6;
+      border-radius: 8px;
+      padding: 15px;
+      background: #f8f9fa;
+    }
+
+    details.collapsible summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 16px;
+      color: #667eea;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    details.collapsible summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.collapsible summary::after {
+      content: '▼';
+      font-size: 12px;
+      transition: transform 0.2s;
+    }
+
+    details.collapsible[open] summary::after {
+      transform: rotate(180deg);
+    }
+
+    details.collapsible[open] {
+      background: white;
+    }
+
+    .option-item {
+      margin-top: 15px;
+    }
+
+    .option-item:first-child {
+      margin-top: 0;
+    }
+
+    .option-label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .option-description {
+      color: #666;
+      font-size: 13px;
+      margin-top: 5px;
+      margin-left: 28px;
+    }
   </style>
 </head>
 
@@ -487,205 +561,116 @@
         <p id="metadataFileName" style="margin-top: 10px; color: #28a745; font-weight: 600"></p>
       </div>
 
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              cursor: pointer;
-              font-size: 16px;
-            ">
-          <input type="checkbox" id="mergeOverlaysCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-          <span><strong>Merge overlays</strong> (images and videos)</span>
-        </label>
-        <p style="
-              color: #666;
-              margin-top: 10px;
-              font-size: 14px;
-              margin-left: 28px;
-            ">
-          Combine -main and -overlay files into a single file. Video merging
-          uses FFmpeg.wasm (may take 1-5 minutes per video).
-        </p>
-      </div>
-
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              cursor: pointer;
-              font-size: 16px;
-            ">
-          <input type="checkbox" id="deferVideoOverlaysCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-          <span><strong>Process video overlays at end</strong></span>
-        </label>
-        <p style="
-              color: #666;
-              margin-top: 10px;
-              font-size: 14px;
-              margin-left: 28px;
-            ">
-          Download all memories first, then process video overlays at the end.
-          This allows uninterrupted downloading but uses more disk space temporarily.
-          Only applies when "Merge overlays" is enabled.
-        </p>
-      </div>
-
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              cursor: pointer;
-              font-size: 16px;
-            ">
-          <input type="checkbox" id="overlaysOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-          <span><strong>Overlays only</strong> (skip memories without overlays)</span>
-        </label>
-        <p style="
-              color: #666;
-              margin-top: 10px;
-              font-size: 14px;
-              margin-left: 28px;
-            ">
-          Only download memories that have text/sticker overlays. Skips plain photos and videos.
-        </p>
-      </div>
-
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <div style="margin-bottom: 15px">
-          <label style="
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                cursor: pointer;
-                font-size: 16px;
-              ">
-            <input type="checkbox" id="videosOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-            <span><strong>Videos only</strong> (skip pictures)</span>
+      <!-- Basic Options -->
+      <div class="options-group">
+        <div class="option-item">
+          <label class="option-label">
+            <input type="checkbox" id="mergeOverlaysCheckbox" style="width: 18px; height: 18px; cursor: pointer" checked />
+            <span>Merge overlays</span>
           </label>
-          <p style="
-                color: #666;
-                margin-top: 10px;
-                font-size: 14px;
-                margin-left: 28px;
-              ">
-            Only download and process videos. Useful for re-processing videos
-            with overlay merging.
+          <p class="option-description">
+            Combine -main and -overlay files into a single file (recommended for most users)
           </p>
         </div>
-        <div>
-          <label style="
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                cursor: pointer;
-                font-size: 16px;
-              ">
-            <input type="checkbox" id="picturesOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-            <span><strong>Pictures only</strong> (skip videos)</span>
-          </label>
-          <p style="
-                color: #666;
-                margin-top: 10px;
+
+        <div class="option-item" style="margin-top: 20px;">
+          <label style="display: block; margin-bottom: 10px; font-size: 16px; font-weight: 600;">Batch Size</label>
+          <select id="batchSizeSelect" style="
+                padding: 10px;
+                border: 2px solid #667eea;
+                border-radius: 6px;
                 font-size: 14px;
-                margin-left: 28px;
+                width: 100%;
+                max-width: 250px;
+                cursor: pointer;
               ">
-            Only download and process pictures. Useful for re-processing
-            images with overlay merging.
+            <option value="50" selected>50 files per batch (recommended)</option>
+            <option value="100">100 files per batch</option>
+            <option value="200">200 files per batch</option>
+            <option value="0">All in one ZIP</option>
+            <option value="10">10 files per batch</option>
+            <option value="20">20 files per batch</option>
+          </select>
+          <p class="option-description" style="margin-left: 0;">
+            Split downloads into multiple ZIPs for better browser performance
           </p>
         </div>
       </div>
 
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              cursor: pointer;
-              font-size: 16px;
-            ">
-          <input type="checkbox" id="timestampFilenamesCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
-          <span><strong>Timestamp-based filenames</strong></span>
-        </label>
-        <p style="
-              color: #666;
-              margin-top: 10px;
-              font-size: 14px;
-              margin-left: 28px;
-            ">
-          Name files as YYYY.MM.DD-HH:MM:SS.ext based on capture date instead of sequential numbers. Makes sorting by date easier.
-        </p>
-      </div>
+      <!-- Filters (Collapsible) -->
+      <details class="collapsible" style="margin-top: 25px;">
+        <summary>Filter Options</summary>
+        <div style="margin-top: 15px;">
+          <div class="option-item">
+            <label class="option-label">
+              <input type="checkbox" id="overlaysOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
+              <span>Overlays only</span>
+            </label>
+            <p class="option-description">Only download memories with text/sticker overlays</p>
+          </div>
 
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="display: block; margin-bottom: 10px; font-size: 16px"><strong>Batch Size</strong></label>
-        <select id="batchSizeSelect" style="
-              padding: 8px;
-              border: 2px solid #667eea;
-              border-radius: 4px;
-              font-size: 14px;
-              width: 200px;
-            ">
-          <option value="10">10 files per batch</option>
-          <option value="20">20 files per batch</option>
-          <option value="50" selected>50 files per batch</option>
-          <option value="100">100 files per batch</option>
-          <option value="200">200 files per batch</option>
-          <option value="0">All in one ZIP</option>
-        </select>
-        <p style="color: #666; margin-top: 10px; font-size: 14px">
-          Downloads will be split into multiple ZIP files. Videos with overlays are processed individually to prevent memory issues.
-        </p>
-      </div>
+          <div class="option-item">
+            <label class="option-label">
+              <input type="checkbox" id="videosOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
+              <span>Videos only</span>
+            </label>
+            <p class="option-description">Skip all pictures</p>
+          </div>
 
-      <div style="
-            margin-top: 25px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-          ">
-        <label style="display: block; margin-bottom: 10px; font-size: 16px"><strong>Video Memory Management</strong></label>
-        <select id="ffmpegResetIntervalSelect" style="
-              padding: 8px;
-              border: 2px solid #667eea;
-              border-radius: 4px;
-              font-size: 14px;
-              width: 250px;
-            ">
-          <option value="3">Reset every 3 videos (safest)</option>
-          <option value="5" selected>Reset every 5 videos (recommended)</option>
-          <option value="10">Reset every 10 videos (faster)</option>
-          <option value="999">Never reset (risky)</option>
-        </select>
-        <p style="color: #666; margin-top: 10px; font-size: 14px">
-          Recreates the video processor to prevent memory buildup. Lower values are safer but slightly slower.
-        </p>
-      </div>
+          <div class="option-item">
+            <label class="option-label">
+              <input type="checkbox" id="picturesOnlyCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
+              <span>Pictures only</span>
+            </label>
+            <p class="option-description">Skip all videos</p>
+          </div>
+        </div>
+      </details>
+
+      <!-- Advanced Options (Collapsible) -->
+      <details class="collapsible" style="margin-top: 20px;">
+        <summary>Advanced Options</summary>
+        <div style="margin-top: 15px;">
+          <div class="option-item">
+            <label class="option-label">
+              <input type="checkbox" id="deferVideoOverlaysCheckbox" style="width: 18px; height: 18px; cursor: pointer" checked />
+              <span>Process video overlays at end</span>
+            </label>
+            <p class="option-description">
+              Keep all files in the same batch - process video overlays after downloading everything (recommended)
+            </p>
+          </div>
+
+          <div class="option-item">
+            <label class="option-label">
+              <input type="checkbox" id="timestampFilenamesCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
+              <span>Timestamp-based filenames</span>
+            </label>
+            <p class="option-description">Name files as YYYY.MM.DD-HH:MM:SS.ext instead of sequential numbers</p>
+          </div>
+
+          <div class="option-item" style="margin-top: 20px;">
+            <label style="display: block; margin-bottom: 10px; font-size: 16px; font-weight: 600;">Video Memory Management</label>
+            <select id="ffmpegResetIntervalSelect" style="
+                  padding: 10px;
+                  border: 2px solid #667eea;
+                  border-radius: 6px;
+                  font-size: 14px;
+                  width: 100%;
+                  max-width: 300px;
+                  cursor: pointer;
+                ">
+              <option value="5" selected>Reset every 5 videos (recommended)</option>
+              <option value="3">Reset every 3 videos (safest)</option>
+              <option value="10">Reset every 10 videos (faster)</option>
+              <option value="999">Never reset (risky)</option>
+            </select>
+            <p class="option-description" style="margin-left: 0;">
+              How often to restart the video processor to prevent memory buildup
+            </p>
+          </div>
+        </div>
+      </details>
 
       <div style="margin-top: 30px; text-align: center">
         <button id="startButton" style="
@@ -875,19 +860,14 @@
           To ensure <strong>zero memory accumulation</strong>, the tool uses a smart download strategy:
         </p>
         <ul style="margin-left: 20px; margin-top: 5px;">
-          <li><strong>Images:</strong> Processed normally and accumulate in a ZIP</li>
-          <li><strong>Videos with overlays:</strong> When encountered:
-            <ol style="margin-left: 20px; margin-top: 5px;">
-              <li>Current batch is downloaded immediately</li>
-              <li>Video is merged in isolation</li>
-              <li>Video gets its own dedicated ZIP file</li>
-              <li>Processing continues with next items</li>
-            </ol>
-          </li>
+          <li><strong>Images:</strong> Merged overlays accumulate normally in a batch ZIP</li>
+          <li><strong>Videos with overlays (immediate merge):</strong> Each merged video gets its own dedicated ZIP file to prevent memory buildup</li>
+          <li><strong>Videos with overlays (deferred):</strong> When "Process video overlays at end" is enabled, videos stay in the batch and are processed later</li>
+          <li><strong>Videos without overlays:</strong> Stay in the batch ZIP like normal files</li>
           <li><strong>Result:</strong> Merged videos <strong>never</strong> accumulate in memory!</li>
         </ul>
         <p style="margin-top: 10px;">
-          This means you can process 100+ items safely - you'll just get multiple ZIP files (images + individual videos).
+          Use <strong>"Process video overlays at end"</strong> to keep all files in the same batch and get fewer ZIP files overall.
         </p>
 
         <h3 style="margin-top: 20px; color: #667eea">
@@ -2417,27 +2397,14 @@
       for (let i = 0; i < batchItems.length; i++) {
         const item = batchItems[i];
         const globalCount = globalStartIndex + i + 1;
-        const isVideo = item.metadata.media_type === 'Video';
 
-        // Check if this video will need merging
-        const needsMerge = isVideo && mergeEnabled;
-
-        // If we encounter a video needing merge and we have items in the current ZIP, flush it
-        if (needsMerge && itemsInCurrentZip > 0) {
-          addLog(`  Downloading batch before video merge (${itemsInCurrentZip} items)...`, 'info');
-          await downloadCurrentBatch(metadataList, batchNum, subBatchNum);
-          subBatchNum++;
-          zip = new JSZip();
-          itemsInCurrentZip = 0;
-          checkMemoryUsage();
-        }
-
-        // Process the item
-        await processItem(item, globalCount, totalItems, metadataList, useTimestampFilenames);
+        // Process the item and check if it merged a video overlay immediately
+        const result = await processItem(item, globalCount, totalItems, metadataList, useTimestampFilenames);
         itemsInCurrentZip++;
 
-        // If this was a video that needed merging, download it immediately in its own ZIP
-        if (needsMerge) {
+        // If a video overlay was merged immediately (not deferred), download it in its own ZIP
+        // This ensures merged videos never accumulate in memory
+        if (result.mergedVideoImmediately) {
           addLog(`  Downloading merged video individually...`, 'info');
           await downloadCurrentBatch(metadataList, batchNum, subBatchNum, `video-${item.metadata.number}`);
           subBatchNum++;
@@ -2695,11 +2662,13 @@
     /**
      * Process a single item (image or video)
      * Extracted from processBatch to support smart batching
+     * Returns { mergedVideoImmediately: boolean } to indicate if a video overlay was merged immediately
      */
     async function processItem(batchItem, globalCount, totalItems, metadataList, useTimestampFilenames) {
       const { metadata, index: i } = batchItem;
       const fileNum = String(metadata.number).padStart(2, "0");
       const extension = metadata.media_type === "Video" ? ".mp4" : ".jpg";
+      let mergedVideoImmediately = false; // Track if we merged a video overlay immediately
 
       updateProgress(globalCount, totalItems);
       addLog(
@@ -2998,6 +2967,9 @@
                       "success"
                     );
 
+                    // Mark that we merged a video overlay immediately (not deferred)
+                    mergedVideoImmediately = true;
+
                     // Check memory after video processing
                     checkMemoryUsage();
                   } else {
@@ -3224,7 +3196,8 @@
         metadata.error = error.message;
       }
 
-      // Delays happen at the sub-batch level in processBatch, not per-item
+      // Return whether we merged a video overlay immediately
+      return { mergedVideoImmediately };
     }
 
     function formatBytes(bytes) {
