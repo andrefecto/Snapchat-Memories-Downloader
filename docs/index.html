@@ -1423,14 +1423,25 @@
 
         // Read output file
         const outputData = await ffmpeg.readFile("output.mp4");
-        const outputBuffer = outputData.buffer;
+
+        // Validate output size
+        if (outputData.byteLength < 1000) {
+          addLog(`WARNING: Output video is suspiciously small (${outputData.byteLength} bytes)`, "warning");
+          console.warn("addVideoMetadata output too small:", outputData.byteLength);
+          return videoData; // Return original on failure
+        }
 
         // Clean up virtual filesystem
         await ffmpeg.deleteFile("input.mp4");
         await ffmpeg.deleteFile("output.mp4");
 
+        // CRITICAL BUG FIX: Must use .slice().buffer, NOT .buffer directly!
+        // FFmpeg.readFile() returns a Uint8Array that may be a VIEW into a larger ArrayBuffer.
+        // Using .buffer directly returns the ENTIRE underlying ArrayBuffer (with garbage data).
+        // This creates corrupted video files with extra bytes at the end.
+        // Solution: .slice() creates NEW Uint8Array with ONLY the valid data, then extract .buffer
         addLog(`  Video metadata added successfully`, "success");
-        return outputBuffer;
+        return outputData.slice().buffer;
 
       } catch (error) {
         console.warn("Could not add video metadata:", error);
@@ -3193,12 +3204,12 @@
             zip.file(filename, fileData, zipOptions);
             metadata.files.push({
               path: filename,
-              size: arrayBuffer.byteLength,
+              size: fileData.byteLength,  // Use fileData size (after metadata added)
               type: "single",
             });
             addLog(
               `  Downloaded: ${filename} (${formatBytes(
-                arrayBuffer.byteLength
+                fileData.byteLength
               )})`,
               "success"
             );
