@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2024-12-29
+
+### 🐛 Bug Fixes
+- **Fixed Python NameError in exception handler** - The `update_video_metadata()` function's exception handler referenced a variable (`backup_path`) that might not exist if an error occurred early in the function (e.g., during coordinate parsing). Now properly wrapped in try/except.
+- **Fixed missing radix parameter in parseInt** - Web version now explicitly uses radix 10 in parseInt() call for proper parsing and compliance with best practices.
+
+### Technical Details
+
+**Bug #1: Python NameError (Medium Severity)**
+- **File:** `download_memories.py:579-589`
+- **Trigger:** Invalid latitude/longitude values or timezone parsing errors
+- **Impact:** Crash with confusing NameError instead of graceful failure
+- **Fix:** Wrapped backup restoration in try/except block
+
+**Bug #2: parseInt Radix (Low Severity)**
+- **File:** `docs/index.html:1052`
+- **Trigger:** Legacy browsers interpreting numeric strings
+- **Impact:** Theoretical parsing issues (unlikely with modern browsers)
+- **Fix:** Added explicit radix parameter: `parseInt(value, 10)`
+
+### Discovery
+Both bugs found via systematic code audit, not user reports.
+
 ## [1.2.1] - 2024-12-29
 
 ### 🔥 CRITICAL Bug Fix
@@ -141,6 +164,7 @@ Special thanks to:
 - Multi-snap video joining
 - Timestamp-based filenames
 
+[1.2.2]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.0.0...v1.1.0
