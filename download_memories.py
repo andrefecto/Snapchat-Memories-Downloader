@@ -709,9 +709,22 @@ def merge_video_overlay(
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1000:
             return True
         else:
-            # Log error for debugging
+            # Log error for debugging with more context
             error_msg = result.stderr.decode('utf-8', errors='ignore')
-            print(f"    FFmpeg error: {error_msg[-500:]}")  # Last 500 chars
+            print(f"    FFmpeg exit code: {result.returncode}")
+
+            # Check if file was created but is too small
+            if output_path.exists():
+                file_size = output_path.stat().st_size
+                print(f"    Output file size: {file_size} bytes (need > 1000)")
+                if file_size < 1000:
+                    print(f"    File too small, likely encoding failure")
+            else:
+                print(f"    Output file not created")
+
+            # Print last part of stderr (where actual errors usually are)
+            print(f"    FFmpeg stderr (last 600 chars):")
+            print(f"    {error_msg[-600:]}")
             return False
 
     except subprocess.TimeoutExpired:
