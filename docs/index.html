@@ -1343,8 +1343,15 @@
      * Adds creation_time and GPS location metadata to MP4 files for compatibility
      * with Apple Photos, Google Photos, and other media apps.
      *
-     * Uses FFmpeg metadata flags similar to Python version:
+     * CRITICAL for Apple Photos:
+     * - Sets com.apple.quicktime.creationdate (Apple Photos uses this instead of creation_time)
+     * - Without this, videos import at wrong local time even when GPS is present
+     * - NOTE: Web version only supports UTC timestamps (Python version has timezone conversion)
+     *
+     * Metadata fields set:
      * - creation_time: ISO 8601 timestamp in UTC
+     * - com.apple.quicktime.creationdate: QuickTime-specific date field (UTC)
+     * - com.apple.quicktime.make: Device identifier ("Snapchat")
      * - location: ISO 6709 format (e.g., "+34.0522-118.2437/")
      * - location-eng: Human-readable format (e.g., "34.052235, -118.243683")
      * - com.apple.quicktime.location.ISO6709: Apple-specific GPS format
@@ -1397,10 +1404,15 @@
         // Build FFmpeg command - copy video streams, only update metadata (fast)
         const args = [
           "-i", "input.mp4",
+          // Generic metadata (cross-platform)
           "-metadata", `creation_time=${creationTime}`,
           "-metadata", `location=${lat >= 0 ? '+' : ''}${lat.toFixed(6)}${lon >= 0 ? '+' : ''}${lon.toFixed(6)}/`,
           "-metadata", `location-eng=${lat}, ${lon}`,
+          // QuickTime-specific metadata (CRITICAL for Apple Photos)
+          "-metadata", `com.apple.quicktime.creationdate=${creationTime}`,
+          "-metadata", `com.apple.quicktime.make=Snapchat`,
           "-metadata", `com.apple.quicktime.location.ISO6709=${lat >= 0 ? '+' : ''}${lat.toFixed(4).padStart(8, '0')}${lon >= 0 ? '+' : ''}${lon.toFixed(4).padStart(9, '0')}/`,
+          // Stream copy - no re-encoding
           "-codec", "copy",  // Copy streams without re-encoding (fast!)
           "-y",              // Overwrite output
           "output.mp4"
