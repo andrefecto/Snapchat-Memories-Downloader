@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2024-12-29
+
+### 🔥 CRITICAL Bug Fix
+- **Fixed video corruption in web version** - All videos downloaded with web version v1.2.0 are corrupted and will not play. This emergency patch fixes the critical bug that was introduced in v1.2.0.
+
+### Root Cause
+The `addVideoMetadata()` function (added in v1.2.0 for GPS support) was using `.buffer` directly instead of `.slice().buffer` when extracting video data from FFmpeg.wasm. This caused thousands of garbage bytes to be appended to every video file, making them unplayable in all video players.
+
+### Technical Details
+```javascript
+// WRONG (v1.2.0) - Includes garbage bytes
+const outputData = await ffmpeg.readFile("output.mp4");
+return outputData.buffer;  // Returns 4096 bytes when video is only 1000 bytes
+
+// CORRECT (v1.2.1) - Only valid data
+return outputData.slice().buffer;  // Returns exact 1000 bytes
+```
+
+### Impact
+ALL videos downloaded with web version v1.2.0 are affected:
+- Single videos with GPS metadata
+- Merged videos with GPS metadata
+- Videos in deferred processing
+- Separate `-main.mp4` files
+
+Videos show "Media Offline" or similar errors in all players, even after ZIP extraction.
+
+### 🐛 Additional Fixes
+- Fixed file size tracking to use correct size after metadata addition
+- Added output size validation (< 1000 bytes = failure, returns original)
+
+### ⚠️ Action Required for Users
+**If you downloaded videos using web version v1.2.0, you MUST re-download them.**
+
+The Python version (download_memories.py) was NOT affected by this bug.
+
 ## [1.2.0] - 2024-12-29
 
 ### 🔥 Critical Bug Fixes
@@ -105,6 +141,7 @@ Special thanks to:
 - Multi-snap video joining
 - Timestamp-based filenames
 
+[1.2.1]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/andrefecto/Snapchat-Memories-Downloader/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/andrefecto/Snapchat-Memories-Downloader/releases/tag/v1.0.0
