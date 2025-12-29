@@ -474,17 +474,22 @@ def update_video_metadata(
 ) -> bool:
     """
     Update video metadata using FFmpeg with timezone-aware timestamps and GPS coordinates.
-    
+
     Adds creation_time metadata with proper timezone handling and GPS location data
     in multiple formats for maximum compatibility across different video players.
-    
+
+    CRITICAL for Apple Photos:
+    - Sets com.apple.quicktime.creationdate with timezone offset (e.g., "2024-08-10T15:03:03-0700")
+    - Apple Photos ignores container creation_time and uses QuickTime fields instead
+    - Without this, videos import at wrong local time even when GPS is present
+
     Args:
         video_path: Path to video file
         date_str: Snapchat date string (e.g., "2025-11-30 00:31:09 UTC")
-        latitude: Latitude as string (e.g., "34.052235") 
+        latitude: Latitude as string (e.g., "34.052235")
         longitude: Longitude as string (e.g., "-118.243683")
-        use_local_timezone: If True, convert UTC to local timezone
-        
+        use_local_timezone: If True, convert UTC to local timezone based on GPS
+
     Returns:
         True if metadata update successful, False otherwise
     """
@@ -501,13 +506,22 @@ def update_video_metadata(
         if use_local_timezone and timezone_support and lat is not None and lon is not None:
             timezone_str = get_timezone_from_gps(lat, lon)
             local_datetime = convert_utc_to_local(date_str, timezone_str)
-            creation_time = local_datetime.isoformat()  # ISO 8601 with timezone
+            creation_time = local_datetime.isoformat()  # ISO 8601 with timezone (e.g., 2024-08-10T15:03:03-07:00)
+
+            # QuickTime date format: "2024-08-10T15:03:03-0700" (no colon in timezone offset)
+            # Convert ISO 8601 "2024-08-10T15:03:03-07:00" -> QuickTime "2024-08-10T15:03:03-0700"
+            if creation_time[-3] == ':' and (creation_time[-6] in ['+', '-']):
+                # Remove the colon from timezone offset
+                quicktime_date = creation_time[:-3] + creation_time[-2:]
+            else:
+                quicktime_date = creation_time
         else:
             # Fallback to UTC
             date_clean = date_str.replace(' UTC', '')
             try:
                 dt = datetime.strptime(date_clean, '%Y-%m-%d %H:%M:%S')
-                creation_time = dt.isoformat() + 'Z'  # UTC format
+                creation_time = dt.isoformat() + 'Z'  # UTC format (e.g., 2024-08-10T22:03:03Z)
+                quicktime_date = creation_time  # QuickTime accepts Z suffix for UTC
             except ValueError:
                 print(f"    Warning: Could not parse date '{date_str}' for video metadata")
                 return False
@@ -520,8 +534,11 @@ def update_video_metadata(
         cmd = [
             "ffmpeg", "-i", str(backup_path),
             "-metadata", f"creation_time={creation_time}",
+            # QuickTime date fields - CRITICAL for Apple Photos
+            "-metadata", f"com.apple.quicktime.creationdate={quicktime_date}",
+            "-metadata", f"com.apple.quicktime.make=Snapchat",
         ]
-        
+
         # Add GPS metadata if available
         if lat is not None and lon is not None:
             # Multiple location formats for compatibility
@@ -1334,11 +1351,41 @@ def join_multi_snaps(folder_path: Path, time_threshold_seconds: int = 10) -> dic
     """
     Detect and join videos that were part of multi-snap stories.
     Groups videos by timestamp (within time_threshold_seconds) and concatenates them.
+
+    IMPORTANT: Preserves metadata from first video in group (GPS + timestamp).
+    Reads metadata.json to restore GPS coordinates and date information that would
+    otherwise be lost during FFmpeg concat operation.
+
     Returns dict with statistics: {'groups_found': int, 'videos_joined': int, 'files_deleted': int}
     """
     if not ffmpeg_available:
         print("\nWarning: FFmpeg not available, cannot join multi-snaps")
         return {'groups_found': 0, 'videos_joined': 0, 'files_deleted': 0}
+
+    # Try to load metadata.json to preserve GPS and date information
+    metadata_file = folder_path / 'metadata.json'
+    metadata_dict = {}
+    if metadata_file.exists():
+        try:
+            import json
+            with open(metadata_file, 'r', encoding='utf-8') as f:
+                metadata_content = json.load(f)
+                # Handle both old format (list) and new format (dict with 'memories' key)
+                memories = metadata_content.get('memories', metadata_content) if isinstance(metadata_content, dict) else metadata_content
+                # Create a lookup dict by filename
+                for memory in memories:
+                    if memory.get('files'):
+                        for file_info in memory['files']:
+                            filename = file_info.get('path', '')
+                            if filename:
+                                metadata_dict[filename] = {
+                                    'date': memory.get('date', 'Unknown'),
+                                    'latitude': memory.get('latitude', 'Unknown'),
+                                    'longitude': memory.get('longitude', 'Unknown')
+                                }
+        except Exception as e:
+            print(f"Note: Could not load metadata.json: {e}")
+            print("Joined videos will not have GPS/date metadata")
 
     print("\n" + "=" * 60)
     print("Detecting multi-snap videos...")
@@ -1441,6 +1488,25 @@ def join_multi_snaps(folder_path: Path, time_threshold_seconds: int = 10) -> dic
                 # Set timestamp to match first video
                 first_stat = first_video.stat()
                 os.utime(output_path, (first_stat.st_atime, first_stat.st_mtime))
+
+                # Restore GPS and date metadata from first video (CRITICAL for Apple Photos)
+                first_video_name = first_video.name
+                if first_video_name in metadata_dict:
+                    metadata_info = metadata_dict[first_video_name]
+                    print(f"    Restoring metadata from: {first_video_name}")
+                    success = update_video_metadata(
+                        output_path,
+                        metadata_info['date'],
+                        metadata_info['latitude'],
+                        metadata_info['longitude'],
+                        use_local_timezone=True  # Use local timezone for proper Apple Photos import
+                    )
+                    if success:
+                        print(f"    GPS and date metadata restored to joined video")
+                    else:
+                        print(f"    Warning: Could not restore metadata to joined video")
+                else:
+                    print(f"    Note: No metadata found for {first_video_name}, joined video will lack GPS/date info")
 
                 # Delete original videos
                 for video in group:
