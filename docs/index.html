@@ -674,6 +674,28 @@
               How often to restart the video processor to prevent memory buildup
             </p>
           </div>
+
+          <div class="option-item" style="margin-top: 20px;">
+            <label style="display: block; margin-bottom: 10px; font-size: 16px; font-weight: 600;">Download Rate Limiting</label>
+            <select id="rateLimitDelaySelect" style="
+                  padding: 10px;
+                  border: 2px solid #667eea;
+                  border-radius: 6px;
+                  font-size: 14px;
+                  width: 100%;
+                  max-width: 300px;
+                  cursor: pointer;
+                ">
+              <option value="0">No delay (fastest, may hit rate limits)</option>
+              <option value="100">100ms delay (recommended)</option>
+              <option value="250">250ms delay (safer)</option>
+              <option value="500" selected>500ms delay (safest for large batches)</option>
+              <option value="1000">1 second delay (very safe)</option>
+            </select>
+            <p class="option-description" style="margin-left: 0;">
+              Delay between downloads to avoid AWS/Snapchat rate limits. Use 500ms+ if seeing frequent 500 errors.
+            </p>
+          </div>
         </div>
       </details>
 
@@ -1483,9 +1505,16 @@
      */
     async function mergeImageOverlay(mainData, overlayData) {
       return new Promise((resolve, reject) => {
-        // Create blobs
-        const mainBlob = new Blob([mainData]);
-        const overlayBlob = new Blob([overlayData]);
+        // Detect image formats for better error messages
+        const mainFormat = detectFileExtension(new Uint8Array(mainData)) || 'unknown';
+        const overlayFormat = detectFileExtension(new Uint8Array(overlayData)) || 'unknown';
+
+        // Create blobs with proper MIME types if possible
+        const mainMime = getImageMimeType(mainFormat);
+        const overlayMime = getImageMimeType(overlayFormat);
+
+        const mainBlob = new Blob([mainData], mainMime ? { type: mainMime } : undefined);
+        const overlayBlob = new Blob([overlayData], overlayMime ? { type: overlayMime } : undefined);
 
         // Create image URLs
         const mainUrl = URL.createObjectURL(mainBlob);
@@ -1498,15 +1527,33 @@
         let mainLoaded = false;
         let overlayLoaded = false;
 
+        // Timeout fallback - if images don't load in 10 seconds, fail
+        const timeout = setTimeout(() => {
+          URL.revokeObjectURL(mainUrl);
+          URL.revokeObjectURL(overlayUrl);
+          reject(new Error(`Image loading timeout - main: ${mainFormat}, overlay: ${overlayFormat}`));
+        }, 10000);
+
         function tryMerge() {
           if (!mainLoaded || !overlayLoaded) return;
 
+          clearTimeout(timeout);
+
           try {
+            // Validate dimensions
+            if (!mainImg.width || !mainImg.height || !overlayImg.width || !overlayImg.height) {
+              throw new Error(`Invalid image dimensions - main: ${mainImg.width}x${mainImg.height}, overlay: ${overlayImg.width}x${overlayImg.height}`);
+            }
+
             // Create canvas with main image dimensions
             const canvas = document.createElement("canvas");
             canvas.width = mainImg.width;
             canvas.height = mainImg.height;
             const ctx = canvas.getContext("2d");
+
+            if (!ctx) {
+              throw new Error("Failed to get 2D context from canvas");
+            }
 
             // Draw main image
             ctx.drawImage(mainImg, 0, 0);
@@ -1517,6 +1564,13 @@
             // Convert to blob
             canvas.toBlob(
               (blob) => {
+                if (!blob) {
+                  URL.revokeObjectURL(mainUrl);
+                  URL.revokeObjectURL(overlayUrl);
+                  reject(new Error("Canvas toBlob failed - returned null"));
+                  return;
+                }
+
                 // Clean up URLs
                 URL.revokeObjectURL(mainUrl);
                 URL.revokeObjectURL(overlayUrl);
@@ -1538,25 +1592,46 @@
           mainLoaded = true;
           tryMerge();
         };
-        mainImg.onerror = () => {
+        mainImg.onerror = (event) => {
+          clearTimeout(timeout);
           URL.revokeObjectURL(mainUrl);
           URL.revokeObjectURL(overlayUrl);
-          reject(new Error("Failed to load main image"));
+          reject(new Error(`Failed to load main image (${mainFormat}) - browser rejected format or corrupt data`));
         };
 
         overlayImg.onload = () => {
           overlayLoaded = true;
           tryMerge();
         };
-        overlayImg.onerror = () => {
+        overlayImg.onerror = (event) => {
+          clearTimeout(timeout);
           URL.revokeObjectURL(mainUrl);
           URL.revokeObjectURL(overlayUrl);
-          reject(new Error("Failed to load overlay image"));
+          reject(new Error(`Failed to load overlay image (${overlayFormat}) - browser rejected format or corrupt data`));
         };
 
         mainImg.src = mainUrl;
         overlayImg.src = overlayUrl;
       });
+    }
+
+    /**
+     * Get MIME type from file extension
+     */
+    function getImageMimeType(ext) {
+      if (!ext) return null;
+      const extLower = ext.toLowerCase().replace('.', '');
+      const mimeMap = {
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'png': 'image/png',
+        'gif': 'image/gif',
+        'webp': 'image/webp',
+        'bmp': 'image/bmp',
+        'tiff': 'image/tiff',
+        'tif': 'image/tiff'
+      };
+      return mimeMap[extLower] || null;
     }
 
     /**
@@ -1977,6 +2052,7 @@
             document.getElementById("timestampFilenamesCheckbox").checked = existingSettings.timestampFilenames || false;
             document.getElementById("batchSizeSelect").value = existingSettings.batchSize || "50";
             document.getElementById("ffmpegResetIntervalSelect").value = existingSettings.ffmpegResetInterval || "5";
+            document.getElementById("rateLimitDelaySelect").value = existingSettings.rateLimitDelay || "500";
             addLog("Restored settings from metadata.json", "info");
           }
 
@@ -2514,8 +2590,12 @@
       let itemsInCurrentZip = 0;
 
       const mergeEnabled = document.getElementById('mergeOverlaysCheckbox').checked;
+      const rateLimitDelay = parseInt(document.getElementById('rateLimitDelaySelect')?.value || '500', 10);
 
       addLog(`Batch ${batchNum}: ${batchItems.length} items to process`, 'info');
+      if (rateLimitDelay > 0) {
+        addLog(`  Rate limiting: ${rateLimitDelay}ms delay between downloads (prevents AWS 500 errors)`, 'info');
+      }
 
       for (let i = 0; i < batchItems.length; i++) {
         // Check if stop was requested
@@ -2531,6 +2611,14 @@
 
         const item = batchItems[i];
         const globalCount = globalStartIndex + i + 1;
+
+        // Rate limiting: Add delay between downloads to avoid AWS/Snapchat CDN limits
+        if (i > 0) {  // Skip delay for first item
+          const rateLimitDelay = parseInt(document.getElementById('rateLimitDelaySelect')?.value || '500', 10);
+          if (rateLimitDelay > 0) {
+            await new Promise(resolve => setTimeout(resolve, rateLimitDelay));
+          }
+        }
 
         // Process the item and check if it merged a video overlay immediately
         const result = await processItem(item, globalCount, totalItems, metadataList, useTimestampFilenames);
@@ -2571,7 +2659,8 @@
         picturesOnly: document.getElementById("picturesOnlyCheckbox").checked,
         timestampFilenames: document.getElementById("timestampFilenamesCheckbox").checked,
         batchSize: document.getElementById("batchSizeSelect").value,
-        ffmpegResetInterval: document.getElementById("ffmpegResetIntervalSelect").value
+        ffmpegResetInterval: document.getElementById("ffmpegResetIntervalSelect").value,
+        rateLimitDelay: document.getElementById("rateLimitDelaySelect").value
       };
     }
 
@@ -2864,8 +2953,16 @@
               const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
 
               if (shouldRetry && attempt < maxRetries) {
-                const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Exponential backoff: 1s, 2s, 4s (max 10s)
-                addLog(`    HTTP ${response.status} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+                // Use longer backoff for 500 errors (likely rate limits from AWS)
+                // Rate limit backoff: 2s, 5s, 10s
+                // Other retryable errors: 1s, 2s, 4s
+                const isRateLimit = response.status >= 500;
+                const baseDelay = isRateLimit ? 2000 : 1000;
+                const maxDelay = isRateLimit ? 10000 : 10000;
+                const waitTime = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+
+                const statusHint = isRateLimit ? ' (AWS rate limit)' : '';
+                addLog(`    HTTP ${response.status}${statusHint} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
                 console.warn(`HTTP ${response.status} fetching ${metadata.url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue; // Retry
@@ -2985,6 +3082,8 @@
                   // Get main and overlay files
                   let mainData = null;
                   let overlayData = null;
+                  let mainName = null;
+                  let overlayName = null;
 
                   for (const filename of files) {
                     const fileData = await innerZip.files[filename].async(
@@ -2992,8 +3091,10 @@
                     );
                     if (filename.toLowerCase().includes("overlay")) {
                       overlayData = fileData;
+                      overlayName = filename;
                     } else {
                       mainData = fileData;
+                      mainName = filename;
                     }
                   }
 
