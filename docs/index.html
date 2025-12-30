@@ -691,6 +691,24 @@
           onclick="handleStartDownload()">
           🚀 Start Download
         </button>
+        <button id="stopButton" style="
+              display: none;
+              background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+              color: white;
+              border: none;
+              padding: 15px 40px;
+              font-size: 18px;
+              font-weight: bold;
+              border-radius: 8px;
+              cursor: pointer;
+              box-shadow: 0 4px 15px rgba(220, 53, 69, 0.4);
+              transition: transform 0.2s, box-shadow 0.2s;
+            "
+          onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 20px rgba(220, 53, 69, 0.6)'"
+          onmouseout="this.style.transform=''; this.style.boxShadow='0 4px 15px rgba(220, 53, 69, 0.4)'"
+          onclick="handleStopDownload()">
+          🛑 Stop & Save Progress
+        </button>
       </div>
     </div>
 
@@ -960,6 +978,7 @@
     const fileName = document.getElementById("fileName");
     const metadataFileName = document.getElementById("metadataFileName");
     const startButton = document.getElementById("startButton");
+    const stopButton = document.getElementById("stopButton");
     const progressContainer = document.getElementById("progressContainer");
     const progressFill = document.getElementById("progressFill");
     const status = document.getElementById("status");
@@ -971,6 +990,8 @@
     let currentIndex = 0;
     let zip = null;
     let deferredVideoOverlays = []; // Track videos with overlays for deferred processing
+    let shouldStop = false; // Flag to stop download gracefully
+    let currentMetadataList = []; // Track current download progress for stop feature
 
     // FFmpeg.wasm for video overlay merging
     let ffmpegLoaded = false;
@@ -1151,12 +1172,13 @@
     function generateFilename(dateStr, extension, useTimestamp, fallbackNum) {
       if (useTimestamp) {
         try {
-          // Parse date string: "2025-11-30 00:31:09 UTC" -> "2025.11.30-00:31:09"
+          // Parse date string: "2025-11-30 00:31:09 UTC" -> "2025.11.30-00.31.09"
+          // Replace colons with dots to ensure Windows compatibility
           const dateStrClean = dateStr.replace(" UTC", "").trim();
           const parts = dateStrClean.split(" ");
           if (parts.length === 2) {
             const datePart = parts[0].replace(/-/g, "."); // "2025.11.30"
-            const timePart = parts[1]; // "00:31:09"
+            const timePart = parts[1].replace(/:/g, "."); // "00.31.09" (Windows-safe)
             return `${datePart}-${timePart}${extension}`;
           } else {
             // Fallback to sequential if date format is unexpected
@@ -1443,7 +1465,8 @@
 
       } catch (error) {
         console.warn("Could not add video metadata:", error);
-        addLog(`  Warning: Failed to add video metadata: ${error.message}`, "warning");
+        const errorMsg = error.message || error.toString() || 'unknown error';
+        addLog(`  Warning: Failed to add video metadata: ${errorMsg}`, "warning");
         return videoData; // Return original video on error
       }
     }
@@ -2138,23 +2161,87 @@
     }
 
     function handleStartDownload() {
-      // Hide the start button and show progress
+      // Reset stop flag
+      shouldStop = false;
+
+      // Hide start button, show stop button and progress
       startButton.style.display = "none";
+      stopButton.style.display = "inline-block";
       progressContainer.style.display = "block";
 
       // Start the download
       startDownload();
     }
 
+    function handleStopDownload() {
+      // Set stop flag
+      shouldStop = true;
+      addLog("\n⏸ Stop requested - will save progress after current item completes...", "warning");
+
+      // Disable stop button to prevent multiple clicks
+      stopButton.disabled = true;
+      stopButton.textContent = "⏸ Stopping...";
+      stopButton.style.opacity = "0.6";
+    }
+
+    async function finalizeAndDownload(metadataList, label = "stopped") {
+      // Create final ZIP with metadata
+      const finalZip = new JSZip();
+      const metadataWithSettings = {
+        settings: captureCurrentSettings(),
+        memories: metadataList
+      };
+      finalZip.file("metadata.json", JSON.stringify(metadataWithSettings, null, 2));
+
+      const filename = `snapchat-memories-${label}.zip`;
+      status.textContent = `Creating ${filename}...`;
+      addLog(`\n📦 Packaging ${filename}...`, "info");
+
+      let zipBlob;
+      try {
+        zipBlob = await finalZip.generateAsync({ type: "blob" });
+      } catch (error) {
+        // Handle memory allocation failures
+        if (error instanceof RangeError || error.message?.includes('allocation')) {
+          addLog(`❌ ERROR: Out of memory creating ${filename}`, "error");
+          addLog(`  This should not happen for metadata-only ZIP`, "error");
+          throw new Error(`Memory allocation failed: ${error.message}`);
+        }
+        throw error; // Re-throw other errors
+      }
+
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      addLog(`✅ Progress saved to ${filename}`, "success");
+      addLog("You can resume later by uploading this metadata.json file", "info");
+
+      // Reset UI
+      stopButton.style.display = "none";
+      stopButton.disabled = false;
+      stopButton.textContent = "🛑 Stop & Save Progress";
+      stopButton.style.opacity = "1";
+      startButton.style.display = "inline-block";
+      shouldStop = false;
+    }
+
     async function startDownload() {
       currentIndex = 0;
       deferredVideoOverlays = []; // Clear deferred videos from previous runs
+      shouldStop = false; // Reset stop flag
 
       // Capture timestamp filename setting
       const useTimestampFilenames = document.getElementById("timestampFilenamesCheckbox").checked;
 
       // Initialize metadata by matching existing metadata with freshly parsed memories
       let metadataList = [];
+      currentMetadataList = []; // Reset global tracking
 
       // Check if we're in metadata-only mode (resume without HTML)
       const metadataOnlyMode = existingMetadata && (!memories || memories.length === 0);
@@ -2304,6 +2391,9 @@
         return;
       }
 
+      // Store metadata list globally for stop functionality
+      currentMetadataList = metadataList;
+
       // Get batch size
       const batchSize = parseInt(
         document.getElementById("batchSizeSelect").value
@@ -2413,6 +2503,17 @@
       addLog(`Batch ${batchNum}: ${batchItems.length} items to process`, 'info');
 
       for (let i = 0; i < batchItems.length; i++) {
+        // Check if stop was requested
+        if (shouldStop) {
+          addLog(`\n⏸ Stopping after processing ${i} of ${batchItems.length} items in this batch`, 'warning');
+          if (itemsInCurrentZip > 0) {
+            addLog(`  Saving ${itemsInCurrentZip} items processed so far...`, 'info');
+            await downloadCurrentBatch(metadataList, batchNum, subBatchNum, 'partial');
+          }
+          await finalizeAndDownload(metadataList, 'stopped');
+          return;
+        }
+
         const item = batchItems[i];
         const globalCount = globalStartIndex + i + 1;
 
@@ -2485,14 +2586,27 @@
       status.textContent = `Creating ${filename}...`;
       addLog(`  Packaging ${filename}...`, "info");
 
-      const zipBlob = await zip.generateAsync(
-        { type: "blob" },
-        (metadata) => {
-          const percent = Math.round(metadata.percent);
-          progressFill.style.width = `${percent}%`;
-          progressFill.textContent = `${percent}%`;
+      let zipBlob;
+      try {
+        zipBlob = await zip.generateAsync(
+          { type: "blob" },
+          (metadata) => {
+            const percent = Math.round(metadata.percent);
+            progressFill.style.width = `${percent}%`;
+            progressFill.textContent = `${percent}%`;
+          }
+        );
+      } catch (error) {
+        // Handle memory allocation failures
+        if (error instanceof RangeError || error.message?.includes('allocation')) {
+          addLog(`❌ ERROR: Out of memory creating ${filename}`, "error");
+          addLog(`  Browser ran out of memory packaging this batch`, "error");
+          addLog(`  💡 SOLUTION: Reduce batch size in settings (try 10 or 20 items)`, "warning");
+          addLog(`  💡 Or enable "Defer video overlays" to reduce memory usage`, "warning");
+          throw new Error(`Memory allocation failed: ${error.message}. Try reducing batch size.`);
         }
-      );
+        throw error; // Re-throw other errors
+      }
 
       // Download the ZIP file
       const url = URL.createObjectURL(zipBlob);
@@ -2541,6 +2655,13 @@
       const total = deferredVideoOverlays.length;
 
       for (let i = 0; i < total; i++) {
+        // Check if stop was requested
+        if (shouldStop) {
+          addLog(`\n⏸ Stopping deferred video processing after ${i} of ${total} videos`, 'warning');
+          await finalizeAndDownload(metadataList, 'stopped');
+          return;
+        }
+
         const item = deferredVideoOverlays[i];
         const { metadata, fileNum, files, innerZip } = item;
         const extension = ".mp4";
@@ -2628,14 +2749,25 @@
             status.textContent = `Creating ${zipFilename}...`;
             addLog(`  Packaging ${zipFilename}...`, "info");
 
-            const zipBlob = await videoZip.generateAsync(
-              { type: "blob" },
-              (zipMetadata) => {
-                const percent = Math.round(zipMetadata.percent);
-                progressFill.style.width = `${percent}%`;
-                progressFill.textContent = `${percent}%`;
+            let zipBlob;
+            try {
+              zipBlob = await videoZip.generateAsync(
+                { type: "blob" },
+                (zipMetadata) => {
+                  const percent = Math.round(zipMetadata.percent);
+                  progressFill.style.width = `${percent}%`;
+                  progressFill.textContent = `${percent}%`;
+                }
+              );
+            } catch (error) {
+              // Handle memory allocation failures
+              if (error instanceof RangeError || error.message?.includes('allocation')) {
+                addLog(`❌ ERROR: Out of memory creating ${zipFilename}`, "error");
+                addLog(`  Browser ran out of memory packaging this video`, "error");
+                throw new Error(`Memory allocation failed for video ${metadata.number}: ${error.message}`);
               }
-            );
+              throw error; // Re-throw other errors
+            }
 
             // Download
             const url = URL.createObjectURL(zipBlob);
@@ -2700,16 +2832,64 @@
       try {
         addLog(`    Fetching: ${metadata.url}`, "info");
         console.log("Fetching:", metadata.url);
-        const response = await fetch(metadata.url);
-        if (!response.ok) {
-          const bodyText = await response.text().catch(() => "<no body>");
-          addLog(`    HTTP error ${response.status} while fetching ${metadata.url}`, "error");
-          console.error(`HTTP ${response.status} fetching ${metadata.url}:`, bodyText);
-          throw new Error(`HTTP ${response.status}`);
+
+        // Retry logic for handling intermittent 500 errors
+        const maxRetries = 3;
+        let arrayBuffer;
+        let lastError;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            const response = await fetch(metadata.url);
+
+            if (!response.ok) {
+              const bodyText = await response.text().catch(() => "<no body>");
+
+              // Retry on 500-series errors (server errors) and 429 (rate limit)
+              const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
+
+              if (shouldRetry && attempt < maxRetries) {
+                const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Exponential backoff: 1s, 2s, 4s (max 10s)
+                addLog(`    HTTP ${response.status} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+                console.warn(`HTTP ${response.status} fetching ${metadata.url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue; // Retry
+              }
+
+              // Non-retryable error or max retries exceeded
+              addLog(`    HTTP error ${response.status} while fetching ${metadata.url}`, "error");
+              console.error(`HTTP ${response.status} fetching ${metadata.url}:`, bodyText);
+              throw new Error(`HTTP ${response.status}`);
+            }
+
+            // Success - get the data
+            const blob = await response.blob();
+            arrayBuffer = await blob.arrayBuffer();
+
+            if (attempt > 1) {
+              addLog(`    ✓ Download succeeded on attempt ${attempt}`, "success");
+            }
+            break; // Success, exit retry loop
+
+          } catch (error) {
+            lastError = error;
+
+            // Network errors (not HTTP errors) - retry
+            if (attempt < maxRetries && !(error.message?.startsWith('HTTP '))) {
+              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+              addLog(`    Network error - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+              console.warn(`Network error fetching ${metadata.url}, retry ${attempt}/${maxRetries}:`, error);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              continue; // Retry
+            }
+
+            throw error; // Re-throw if max retries or HTTP error
+          }
         }
 
-        const blob = await response.blob();
-        const arrayBuffer = await blob.arrayBuffer();
+        if (!arrayBuffer) {
+          throw lastError || new Error('Download failed after retries');
+        }
 
         // Validate downloaded content
         if (arrayBuffer.byteLength < 100) {
