@@ -1367,6 +1367,17 @@
       }
 
       try {
+        // CRITICAL: Check if ArrayBuffer is detached before processing
+        if (videoData.byteLength === 0 || videoData.detached) {
+          console.warn("ArrayBuffer is detached, skipping video metadata");
+          addLog(`  Warning: Video data corrupted (detached buffer), skipping metadata`, "warning");
+          return videoData;
+        }
+
+        // CRITICAL: Create a COPY of the ArrayBuffer to prevent detachment
+        // FFmpeg.wasm operations can detach/transfer buffers, causing issues downstream
+        const videoDataCopy = videoData.slice(0);
+
         const ffmpeg = await initFFmpeg();
         if (!ffmpeg) {
           console.warn("FFmpeg.wasm not available, skipping video metadata");
@@ -1395,8 +1406,8 @@
 
         addLog(`  Adding GPS metadata to video (${lat.toFixed(4)}, ${lon.toFixed(4)})...`, "info");
 
-        // Write input video to FFmpeg virtual filesystem
-        await ffmpeg.writeFile("input.mp4", new Uint8Array(videoData));
+        // Write input video to FFmpeg virtual filesystem (use the copy!)
+        await ffmpeg.writeFile("input.mp4", new Uint8Array(videoDataCopy));
 
         // Build FFmpeg command - copy video streams, only update metadata (fast)
         const args = [
@@ -1438,11 +1449,27 @@
         // This creates corrupted video files with extra bytes at the end.
         // Solution: .slice() creates NEW Uint8Array with ONLY the valid data, then extract .buffer
         addLog(`  Video metadata added successfully`, "success");
+
+        // Increment counter for FFmpeg auto-reset (critical for memory management!)
+        videosProcessedSinceReset++;
+        totalVideosProcessed++;
+
         return outputData.slice().buffer;
 
       } catch (error) {
         console.warn("Could not add video metadata:", error);
         const errorMsg = error.message || error.toString() || 'unknown error';
+
+        // Check for memory-related errors - force FFmpeg reset
+        if (errorMsg.includes('memory access out of bounds') ||
+            errorMsg.includes('RuntimeError') ||
+            errorMsg.includes('detached')) {
+          addLog(`  CRITICAL: FFmpeg memory error detected, forcing reset...`, "error");
+          console.error("FFmpeg memory error, forcing reset:", error);
+          await terminateFFmpeg();
+          videosProcessedSinceReset = 0;
+        }
+
         addLog(`  Warning: Failed to add video metadata: ${errorMsg}`, "warning");
         return videoData; // Return original video on error
       }
@@ -1861,17 +1888,28 @@
           // Ignore cleanup errors
         }
 
-        // On error, terminate FFmpeg instance to ensure clean state for next video
-        addLog('  Video merge failed, resetting FFmpeg for next attempt', 'info');
-        await terminateFFmpeg();
-
-        // Normalize and wrap the error so downstream handlers can log details
+        // Normalize error message
         let errorMsg = "";
         try {
           errorMsg = error && (error.message || String(error) || JSON.stringify(error));
         } catch (e) {
           errorMsg = "Unknown error";
         }
+
+        // Check for memory-related errors - force FFmpeg reset
+        if (errorMsg.includes('memory access out of bounds') ||
+            errorMsg.includes('RuntimeError') ||
+            errorMsg.includes('detached')) {
+          addLog('  CRITICAL: FFmpeg memory error detected during merge, forcing reset...', 'error');
+          console.error("FFmpeg memory error during merge:", error);
+        } else {
+          addLog('  Video merge failed, resetting FFmpeg for next attempt', 'info');
+        }
+
+        // On error, terminate FFmpeg instance to ensure clean state for next video
+        await terminateFFmpeg();
+        videosProcessedSinceReset = 0;
+
         const enhanced = new Error(`FFmpeg merge failed: ${errorMsg}`);
         if (error && error.stack) enhanced.stack = error.stack;
         throw enhanced;
