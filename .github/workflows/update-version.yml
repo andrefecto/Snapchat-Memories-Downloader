@@ -47,7 +47,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
-            git commit -m "chore: update web version to ${{ steps.version.outputs.tag }}"
+            git commit -m "chore: update web version to ${{ steps.version.outputs.tag }} [skip ci]"
             git push origin main
             echo "Version updated successfully!"
           fi
