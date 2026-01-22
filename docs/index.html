@@ -997,6 +997,9 @@
     let ffmpegInstance = null;
     let videosProcessedSinceReset = 0;
     let totalVideosProcessed = 0;
+    let ffmpegDead = false;  // Set true when FFmpeg cannot recover from memory errors
+    let ffmpegInitRetries = 0;  // Track consecutive init failures
+    const FFMPEG_MAX_INIT_RETRIES = 3;  // Give up after this many consecutive failures
 
     // Display version info
     console.log(`%cSnapchat Memories Downloader ${APP_VERSION}`, 'font-weight: bold; font-size: 14px; color: #667eea;');
@@ -1066,6 +1069,11 @@
      * @returns {FFmpeg} FFmpeg.wasm instance
      */
     async function initFFmpeg(forceReload = false) {
+      // If FFmpeg is permanently dead (unrecoverable memory error), skip immediately
+      if (ffmpegDead) {
+        return null;
+      }
+
       // Check if we need to reset due to memory concerns
       const resetInterval = parseInt(document.getElementById('ffmpegResetIntervalSelect')?.value || '5', 10);
 
@@ -1077,47 +1085,74 @@
       }
 
       if (ffmpegLoaded && ffmpegInstance) {
+        ffmpegInitRetries = 0;  // Reset retry counter on successful use
         return ffmpegInstance;
       }
 
-      const { FFmpeg } = FFmpegWASM;
-      ffmpegInstance = new FFmpeg();
+      try {
+        const { FFmpeg } = FFmpegWASM;
+        ffmpegInstance = new FFmpeg();
 
-      // Detect browser
-      const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
-      const isChrome = navigator.userAgent.toLowerCase().indexOf('chrome') > -1;
+        // Detect browser
+        const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
+        const isChrome = navigator.userAgent.toLowerCase().indexOf('chrome') > -1;
 
-      if (isFirefox) {
-        addLog('  ⚠️ Firefox detected: Video merging may be unstable due to WASM limitations', 'warning');
-        addLog('  Recommendation: Use Chrome or Edge for best results', 'warning');
-        addLog('Firefox browser detected - known WASM/FFmpeg compatibility issues', 'warning', 'ffmpeg');
-      }
-
-      addLog('  Loading FFmpeg.wasm (this may take a few seconds)...', 'info');
-      addLog('  💡 Check the "FFmpeg Details" tab for detailed conversion logs', 'info');
-      addLog('Loading FFmpeg.wasm...', 'info', 'ffmpeg');
-
-      await ffmpegInstance.load({
-        coreURL: new URL('./ffmpeg/ffmpeg-core.js', window.location).href,
-        wasmURL: new URL('./ffmpeg/ffmpeg-core.wasm', window.location).href,
-        worker: false
-      });
-
-      // Log FFmpeg backend messages to FFmpeg tab
-      ffmpegInstance.on('log', (m) => {
-        try {
-          const message = m && m.message ? m.message : JSON.stringify(m);
-          addLog(message, 'ffmpeg', 'ffmpeg');
-        } catch(e) {
-          // Ignore logging errors
+        if (isFirefox) {
+          addLog('  ⚠️ Firefox detected: Video merging may be unstable due to WASM limitations', 'warning');
+          addLog('  Recommendation: Use Chrome or Edge for best results', 'warning');
+          addLog('Firefox browser detected - known WASM/FFmpeg compatibility issues', 'warning', 'ffmpeg');
         }
-      });
 
-      ffmpegLoaded = true;
-      videosProcessedSinceReset = 0;
-      addLog('  FFmpeg loaded successfully', 'success');
-      addLog('FFmpeg loaded and ready', 'success', 'ffmpeg');
-      return ffmpegInstance;
+        addLog('  Loading FFmpeg.wasm (this may take a few seconds)...', 'info');
+        addLog('  💡 Check the "FFmpeg Details" tab for detailed conversion logs', 'info');
+        addLog('Loading FFmpeg.wasm...', 'info', 'ffmpeg');
+
+        await ffmpegInstance.load({
+          coreURL: new URL('./ffmpeg/ffmpeg-core.js', window.location).href,
+          wasmURL: new URL('./ffmpeg/ffmpeg-core.wasm', window.location).href,
+          worker: false
+        });
+
+        // Log FFmpeg backend messages to FFmpeg tab
+        ffmpegInstance.on('log', (m) => {
+          try {
+            const message = m && m.message ? m.message : JSON.stringify(m);
+            addLog(message, 'ffmpeg', 'ffmpeg');
+          } catch(e) {
+            // Ignore logging errors
+          }
+        });
+
+        ffmpegLoaded = true;
+        videosProcessedSinceReset = 0;
+        ffmpegInitRetries = 0;  // Reset retry counter on success
+        addLog('  FFmpeg loaded successfully', 'success');
+        addLog('FFmpeg loaded and ready', 'success', 'ffmpeg');
+        return ffmpegInstance;
+
+      } catch (error) {
+        const errorMsg = error.message || error.toString();
+        ffmpegInitRetries++;
+
+        // Check for fatal memory errors that won't recover
+        const isMemoryError = errorMsg.includes('Out of memory') ||
+                              errorMsg.includes('memory') ||
+                              errorMsg.includes('WebAssembly.instantiate');
+
+        if (isMemoryError || ffmpegInitRetries >= FFMPEG_MAX_INIT_RETRIES) {
+          ffmpegDead = true;
+          addLog(`  ❌ FFmpeg permanently disabled: Browser WebAssembly memory exhausted`, 'error');
+          addLog(`  Videos will download without GPS metadata. Refresh page to restore FFmpeg.`, 'warning');
+          addLog(`  Tip: Process fewer videos per session or use smaller batch sizes.`, 'info');
+          addLog(`FFmpeg disabled: ${errorMsg}`, 'error', 'ffmpeg');
+        } else {
+          addLog(`  Warning: FFmpeg init failed (attempt ${ffmpegInitRetries}/${FFMPEG_MAX_INIT_RETRIES}): ${errorMsg}`, 'warning');
+        }
+
+        ffmpegInstance = null;
+        ffmpegLoaded = false;
+        return null;
+      }
     }
 
     /**
@@ -1142,6 +1177,84 @@
         // performance.memory not available (Firefox, Safari)
       }
       return null;
+    }
+
+    /**
+     * Gather and log system information for debugging.
+     * Logs browser, memory, and device info at download start.
+     */
+    function logSystemInfo() {
+      addLog(`\n=== System Information ===`, 'info');
+      addLog(`App Version: ${APP_VERSION}`, 'info');
+      addLog(`Timestamp: ${new Date().toISOString()}`, 'info');
+
+      // Browser and user agent
+      const ua = navigator.userAgent;
+      addLog(`User Agent: ${ua}`, 'info');
+
+      // Detect browser
+      let browser = 'Unknown';
+      if (ua.includes('Firefox/')) {
+        const match = ua.match(/Firefox\/(\d+)/);
+        browser = `Firefox ${match ? match[1] : ''}`;
+      } else if (ua.includes('Edg/')) {
+        const match = ua.match(/Edg\/(\d+)/);
+        browser = `Edge ${match ? match[1] : ''}`;
+      } else if (ua.includes('Chrome/')) {
+        const match = ua.match(/Chrome\/(\d+)/);
+        browser = `Chrome ${match ? match[1] : ''}`;
+      } else if (ua.includes('Safari/') && !ua.includes('Chrome')) {
+        const match = ua.match(/Version\/(\d+)/);
+        browser = `Safari ${match ? match[1] : ''}`;
+      }
+      addLog(`Browser: ${browser}`, 'info');
+
+      // Platform
+      addLog(`Platform: ${navigator.platform || 'Unknown'}`, 'info');
+
+      // Device memory (Chrome/Edge only)
+      if (navigator.deviceMemory) {
+        addLog(`Device Memory: ${navigator.deviceMemory} GB`, 'info');
+      }
+
+      // Hardware concurrency (CPU cores)
+      if (navigator.hardwareConcurrency) {
+        addLog(`CPU Cores: ${navigator.hardwareConcurrency}`, 'info');
+      }
+
+      // JS Heap memory (Chrome only)
+      try {
+        if (performance.memory) {
+          const usedMB = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+          const totalMB = Math.round(performance.memory.totalJSHeapSize / 1024 / 1024);
+          const limitMB = Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024);
+          addLog(`JS Heap: ${usedMB}MB used / ${totalMB}MB total / ${limitMB}MB limit`, 'info');
+        }
+      } catch (e) {
+        // Not available in Firefox/Safari
+      }
+
+      // Screen info
+      if (window.screen) {
+        addLog(`Screen: ${window.screen.width}x${window.screen.height} (${window.devicePixelRatio || 1}x DPR)`, 'info');
+      }
+
+      // Check for WebAssembly support
+      const wasmSupported = typeof WebAssembly === 'object';
+      addLog(`WebAssembly: ${wasmSupported ? 'Supported' : 'Not supported'}`, wasmSupported ? 'info' : 'warning');
+
+      // Connection info (if available)
+      if (navigator.connection) {
+        const conn = navigator.connection;
+        const connInfo = [];
+        if (conn.effectiveType) connInfo.push(conn.effectiveType);
+        if (conn.downlink) connInfo.push(`${conn.downlink}Mbps`);
+        if (connInfo.length > 0) {
+          addLog(`Connection: ${connInfo.join(', ')}`, 'info');
+        }
+      }
+
+      addLog(`=== End System Information ===\n`, 'info');
     }
 
     /**
@@ -1402,7 +1515,12 @@
 
         const ffmpeg = await initFFmpeg();
         if (!ffmpeg) {
-          console.warn("FFmpeg.wasm not available, skipping video metadata");
+          if (ffmpegDead) {
+            // Only log once per session when FFmpeg dies, not for every video
+            console.warn("FFmpeg.wasm disabled due to memory exhaustion, skipping video metadata");
+          } else {
+            console.warn("FFmpeg.wasm not available, skipping video metadata");
+          }
           return videoData;
         }
 
@@ -1734,6 +1852,11 @@
       const ffmpeg = await initFFmpeg(); // Will auto-reset if needed (memory management)
 
       if (!ffmpeg) {
+        if (ffmpegDead) {
+          // Return null to signal graceful skip - main and overlay will be saved separately
+          addLog(`  Skipping video merge (FFmpeg disabled due to memory exhaustion)`, 'warning');
+          return null;
+        }
         throw new Error("FFmpeg.wasm not available");
       }
 
@@ -2326,6 +2449,11 @@
       currentIndex = 0;
       deferredVideoOverlays = []; // Clear deferred videos from previous runs
       shouldStop = false; // Reset stop flag
+      ffmpegDead = false; // Reset FFmpeg dead state for new download session
+      ffmpegInitRetries = 0; // Reset retry counter
+
+      // Log system information for debugging
+      logSystemInfo();
 
       // Capture timestamp filename setting
       const useTimestampFilenames = document.getElementById("timestampFilenamesCheckbox").checked;
@@ -2816,6 +2944,44 @@
               overlayExt
             );
 
+            // If merge returned null (FFmpeg dead), save main and overlay separately
+            if (mergedData === null) {
+              addLog(`  Saving main and overlay files separately (merge unavailable)`, "info");
+              const videoZip = new JSZip();
+              const fileDate = parseSnapchatDate(metadata.date);
+
+              // Add main video with GPS metadata if possible
+              let mainWithMetadata = await addVideoMetadata(mainData, metadata.date, metadata.latitude, metadata.longitude);
+              const mainFilename = generateFilename(metadata.date, '-main.mp4', useTimestampFilenames, fileNum);
+              videoZip.file(mainFilename, mainWithMetadata, { date: fileDate, compression: "STORE" });
+
+              // Add overlay
+              const overlayFilename = generateFilename(metadata.date, `-overlay${overlayExt}`, useTimestampFilenames, fileNum);
+              videoZip.file(overlayFilename, overlayData, { date: fileDate, compression: "STORE" });
+
+              metadata.files = [
+                { path: mainFilename, size: mainWithMetadata.byteLength, type: "main" },
+                { path: overlayFilename, size: overlayData.byteLength, type: "overlay" }
+              ];
+
+              // Add metadata.json
+              const metadataWithSettings = {
+                settings: captureCurrentSettings(),
+                memories: metadataList
+              };
+              videoZip.file("metadata.json", JSON.stringify(metadataWithSettings, null, 2));
+
+              addLog(`  Saved: ${mainFilename} + ${overlayFilename}`, "success");
+
+              // Download the ZIP
+              const zipFilename = `snapchat-memories-deferred-video-${metadata.number}.zip`;
+              const zipBlob = await videoZip.generateAsync({ type: "blob" });
+              saveAs(zipBlob, zipFilename);
+              addLog(`  Downloaded: ${zipFilename}`, "success");
+              metadata.status = "success";
+              continue;  // Move to next deferred video
+            }
+
             // Add GPS and timestamp metadata to merged video
             mergedData = await addVideoMetadata(
               mergedData,
@@ -3254,6 +3420,11 @@
                       overlayIsImage,
                       overlayExt
                     );
+
+                    // If merge returned null (FFmpeg dead), throw to trigger fallback
+                    if (mergedData === null) {
+                      throw new Error("FFmpeg unavailable (memory exhausted)");
+                    }
 
                     // Add GPS and timestamp metadata to merged video
                     mergedData = await addVideoMetadata(
