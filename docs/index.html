@@ -494,45 +494,74 @@
     </div>
 
     <div class="info-box">
-      <h3>📥 First Time? Get Your Snapchat Data</h3>
+      <h3>📥 Instructions</h3>
       <p>
-        Before using this tool, you need to download your data from Snapchat:
+        Before using this tool, you need to download your data from Snapchat. Learn more about how to download your data by visiting this
+        <a href="https://help.snapchat.com/hc/en-us/articles/7012305371156-How-do-I-download-my-data-from-Snapchat" target="_blank">Snapchat help article</a>.
+      </p>
+      <p style="margin-top: 10px;">
+        Follow the step-by-step guide below to download your Snapchat data and use this tool.
+        <strong>Already have your data downloaded? Skip to Step 10.</strong>
       </p>
       <ol>
         <li>
-          <strong>Login</strong> to
-          <a href="https://accounts.snapchat.com/" target="_blank">Snapchat's website</a>
+          Login to <a href="https://accounts.snapchat.com/" target="_blank">Snapchat's website</a>
         </li>
         <li>
-          Click the <strong>menu</strong> in the top left corner
+          Click the menu in the top left corner:
           <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
-            <li>Mobile: Tap "Accounts"</li>
-            <li>Desktop: Click "Account Settings"</li>
+            <li><em>Mobile:</em> Tap <strong>Accounts</strong></li>
+            <li><em>Desktop:</em> Click <strong>Account Settings</strong></li>
           </ul>
         </li>
-        <li>Click <strong>"My Data"</strong></li>
+        <li>Click <strong>My Data</strong></li>
         <li>
           Select the data you want:
           <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
             <li>✅ <strong>Memories</strong> (required for this tool)</li>
             <li>✅ <strong>Chat Media</strong> (optional - now separate)</li>
-            <li>
-              ✅ <strong>Shared Stories</strong> (optional - now separate)
-            </li>
+            <li>✅ <strong>Shared Stories</strong> (optional - now separate)</li>
           </ul>
         </li>
-        <li>Click <strong>"Submit Request"</strong></li>
-        <li>Wait for Snapchat to email you (24-48 hours)</li>
-        <li>Download the ZIP and extract it</li>
+        <li>Choose the date range for your data or leave it unfiltered to receive all data. Larger downloads and longer time ranges take more time to process.</li>
+        <li>Click <strong>Submit Request</strong></li>
         <li>
-          Find <code>memories_history.html</code> in the
-          <code>html/</code> folder
+          Wait for Snapchat to email you a download link once your data is ready.
+          <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
+            <li>The size of your data and your selected options may affect processing time. Snapchat aims to deliver data within 7 days, but larger downloads may take longer.</li>
+          </ul>
         </li>
+        <li>
+          Click the link in the email from <code>no_reply@snapchat.com</code> to download your data.
+          <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
+            <li>Your <strong>My Data</strong> download will arrive as a ZIP file. To open a ZIP file and view the contents, you must have compatible software on your device.</li>
+          </ul>
+        </li>
+        <li>
+          Extract the ZIP file from Snapchat:
+          <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
+            <li><em>Windows:</em> Right-click the ZIP file → select <strong>Extract All</strong></li>
+            <li><em>Mac:</em> Double-click the ZIP file</li>
+          </ul>
+        </li>
+        <li>Locate the <code>memories_history.html</code> file inside the extracted <code>html</code> folder.</li>
+        <li>Return to this tool and upload the <code>memories_history.html</code> file.</li>
+        <li>Select your preferences, including overlay merging, batch size, timestamp-based filenames, and other options.</li>
+        <li>
+          Now, sit back and let the tool do the work for you!
+          <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
+            <li>If the process fails or is interrupted, upload the most recent <code>metadata.json</code> file (included in each ZIP) to resume.</li>
+          </ul>
+        </li>
+        <li>
+          Once the tool has downloaded all the ZIP files of your data, extract each downloaded ZIP file:
+          <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
+            <li><em>Windows:</em> Right-click the ZIP file → select <strong>Extract All</strong></li>
+            <li><em>Mac:</em> Double-click the ZIP file</li>
+          </ul>
+        </li>
+        <li>Once all videos and photos are successfully extracted, you can safely delete the ZIP files and metadata files from your Downloads folder.</li>
       </ol>
-      <p style="font-size: 14px; margin-top: 15px">
-        <a href="https://www.reddit.com/r/techsupport/comments/18mkfvv/is_there_a_way_of_exporting_all_snapchat/"
-          target="_blank">More info on Reddit</a>
-      </p>
     </div>
 
     <div class="upload-section" id="uploadSection">
@@ -837,6 +866,13 @@
         </p>
 
         <h3 style="margin-top: 30px; margin-bottom: 10px; color: #667eea; font-size: 1.1em;">
+          Do I need to keep my screen on?
+        </h3>
+        <p style="margin-bottom: 15px;">
+          Yes! Keep your screen and device awake while the tool is running. If your device goes to sleep or the screen turns off before the download completes, you'll need to use the resume feature (upload your metadata.json) to continue.
+        </p>
+
+        <h3 style="margin-top: 30px; margin-bottom: 10px; color: #667eea; font-size: 1.1em;">
           Can I download Chat Media and Shared Stories too?
         </h3>
         <p style="margin-bottom: 15px;">
@@ -850,10 +886,10 @@
           Snapchat videos use HEVC codec (H.265), which Windows doesn't include by default.
         </p>
         <p style="margin-top: 10px;"><strong>Quick Fix:</strong></p>
-        <ol style="margin-left: 20px; margin-top: 5px;">
-          <li>Install <a href="https://apps.microsoft.com/detail/9n4wgh0z6vhq" target="_blank" style="color: #667eea; font-weight: 600;">HEVC codec from Microsoft Store</a> (FREE)</li>
-          <li><strong>Or</strong> use <a href="https://www.videolan.org/vlc/" target="_blank" style="color: #667eea;">VLC Media Player</a> (plays HEVC without codec)</li>
-        </ol>
+        <ul style="margin-left: 20px; margin-top: 5px;">
+          <li><strong>Windows 10:</strong> Install <a href="https://apps.microsoft.com/detail/9n4wgh0z6vhq" target="_blank" style="color: #667eea; font-weight: 600;">HEVC codec from Microsoft Store</a> (FREE)</li>
+          <li><strong>Windows 11:</strong> Use <a href="https://www.videolan.org/vlc/" target="_blank" style="color: #667eea; font-weight: 600;">VLC Media Player</a> (plays HEVC without requiring a codec install)</li>
+        </ul>
         <p style="margin-top: 10px;">
           <strong>Note:</strong> Not a bug - videos are downloading correctly. This is a Windows limitation.
         </p>
@@ -960,7 +996,7 @@
 
   <script>
     // Version number - automatically updated by GitHub Actions on tag push
-    const APP_VERSION = 'v1.2.8';
+    const APP_VERSION = 'v1.2.9';
     // Global resource load error listener for debugging 404s
     window.addEventListener('error', function (e) {
       try {
@@ -2181,7 +2217,7 @@
 
           // Enable start button for metadata-only resume (no HTML required)
           const pending = existingMetadata.filter(m =>
-            m.status === 'pending' || m.status === 'in_progress' || m.status === 'failed'
+            m.status === 'pending' || m.status === 'in_progress' || m.status === 'failed' || m.status === 'deferred'
           ).length;
           const success = existingMetadata.filter(m => m.status === 'success').length;
 
@@ -2677,15 +2713,19 @@
       const pending = metadataList.filter(
         (m) => m.status === "pending"
       ).length;
+      const deferred = metadataList.filter(
+        (m) => m.status === "deferred"
+      ).length;
 
-      addLog(
-        `\n✓ Complete! ${successful} successful, ${failed} failed, ${pending} pending`,
-        "success"
-      );
+      let summaryMsg = `\n✓ Complete! ${successful} successful, ${failed} failed, ${pending} pending`;
+      if (deferred > 0) {
+        summaryMsg += `, ${deferred} deferred (not processed)`;
+      }
+      addLog(summaryMsg, "success");
 
-      if (failed > 0 || pending > 0) {
+      if (failed > 0 || pending > 0 || deferred > 0) {
         addLog(
-          `Tip: Upload metadata.json (no HTML required) to retry failed/pending items`,
+          `Tip: Upload metadata.json (no HTML required) to retry failed/pending/deferred items`,
           "info"
         );
       }
@@ -3050,6 +3090,7 @@
             URL.revokeObjectURL(url);
 
             addLog(`  ✓ Downloaded: ${zipFilename} (${formatBytes(zipBlob.size)})`, "success");
+            metadata.status = "success";
 
             // Pause for GC
             addLog('  Pausing 2s for garbage collection...', 'info');
@@ -3071,6 +3112,8 @@
           if (error && error.stack) {
             addLog(`    Stack: ${error.stack}`, "info");
           }
+          metadata.status = "failed";
+          metadata.error = errorMsg;
         }
       }
 
@@ -3547,82 +3590,81 @@
               // Save files separately (not merging, no overlay, or single file)
               const fileDate = parseSnapchatDate(metadata.date);
 
-              // Track deferred video overlays
+              // If deferring video overlays, DON'T add to current ZIP - queue for later
               if (shouldDeferVideo) {
-                addLog(`  Deferring video overlay merge until end`, "info");
-              }
-
-              for (const filename of files) {
-                    let fileData = await innerZip.files[filename].async(
-                      "arraybuffer"
-                    );
-                    const isOverlay = filename.toLowerCase().includes("overlay");
-                    // Preserve original extension from the inner filename if present
-                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
-                    if (!origExt) {
-                      const detected = detectFileExtension(new Uint8Array(fileData));
-                      origExt = detected || extension;
-                    }
-                    // Generate base filename and add -main/-overlay suffix
-                    const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
-                    const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
-                    const newFilename = isOverlay
-                      ? `${baseNameNoExt}-overlay${origExt}`
-                      : `${baseNameNoExt}-main${origExt}`;
-
-                    // Add EXIF metadata to images
-                    if (metadata.media_type === "Image") {
-                      fileData = await addExifMetadata(
-                        fileData,
-                        metadata.date,
-                        metadata.latitude,
-                        metadata.longitude
-                      );
-                    }
-
-                    // Add GPS and timestamp metadata to main video file (not overlay)
-                    if (metadata.media_type === "Video" && !isOverlay) {
-                      fileData = await addVideoMetadata(
-                        fileData,
-                        metadata.date,
-                        metadata.latitude,
-                        metadata.longitude
-                      );
-                    }
-
-                    // Store videos uncompressed to prevent browser playback issues
-                    // CRITICAL: Videos MUST use compression: "STORE" (no compression)
-                    //
-                    // Why no compression for videos?
-                    // - MP4/video files are ALREADY compressed (H.264, H.265, etc.)
-                    // - ZIP DEFLATE compression on already-compressed data provides minimal benefit
-                    // - Some browser ZIP decoders BREAK when re-compressing video streams
-                    // - Symptoms: Video won't play, shows errors, or corrupted frames
-                    // - STORE mode = no compression = direct copy into ZIP (safe, fast)
-                    //
-                    // Images can use DEFLATE compression (default) without issues
-                    const zipOptions = { date: fileDate };
-                    if (metadata.media_type === "Video") {
-                      zipOptions.compression = "STORE";  // No compression for videos
-                    }
-
-                    zip.file(newFilename, fileData, zipOptions);
-                    metadata.files.push({
-                      path: newFilename,
-                      size: fileData.byteLength,
-                      type: isOverlay ? "overlay" : "main",
-                    });
-                  }
-              addLog(`  Extracted ${files.length} files from ZIP`, "success");
-
-              // Add to deferred processing queue
-              if (shouldDeferVideo) {
+                addLog(`  Deferring video overlay merge until end (not adding to current batch)`, "info");
                 deferredVideoOverlays.push({
                   metadata: metadata,
                   fileNum: fileNum,
                   files: files,
                   innerZip: innerZip
                 });
+                // Mark as deferred - will be processed and added to its own ZIP later
+                metadata.status = "deferred";
+              } else {
+                // Not deferred - add files to current ZIP
+                for (const filename of files) {
+                      let fileData = await innerZip.files[filename].async(
+                        "arraybuffer"
+                      );
+                      const isOverlay = filename.toLowerCase().includes("overlay");
+                      // Preserve original extension from the inner filename if present
+                      let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
+                      if (!origExt) {
+                        const detected = detectFileExtension(new Uint8Array(fileData));
+                        origExt = detected || extension;
+                      }
+                      // Generate base filename and add -main/-overlay suffix
+                      const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
+                      const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
+                      const newFilename = isOverlay
+                        ? `${baseNameNoExt}-overlay${origExt}`
+                        : `${baseNameNoExt}-main${origExt}`;
+
+                      // Add EXIF metadata to images
+                      if (metadata.media_type === "Image") {
+                        fileData = await addExifMetadata(
+                          fileData,
+                          metadata.date,
+                          metadata.latitude,
+                          metadata.longitude
+                        );
+                      }
+
+                      // Add GPS and timestamp metadata to main video file (not overlay)
+                      if (metadata.media_type === "Video" && !isOverlay) {
+                        fileData = await addVideoMetadata(
+                          fileData,
+                          metadata.date,
+                          metadata.latitude,
+                          metadata.longitude
+                        );
+                      }
+
+                      // Store videos uncompressed to prevent browser playback issues
+                      // CRITICAL: Videos MUST use compression: "STORE" (no compression)
+                      //
+                      // Why no compression for videos?
+                      // - MP4/video files are ALREADY compressed (H.264, H.265, etc.)
+                      // - ZIP DEFLATE compression on already-compressed data provides minimal benefit
+                      // - Some browser ZIP decoders BREAK when re-compressing video streams
+                      // - Symptoms: Video won't play, shows errors, or corrupted frames
+                      // - STORE mode = no compression = direct copy into ZIP (safe, fast)
+                      //
+                      // Images can use DEFLATE compression (default) without issues
+                      const zipOptions = { date: fileDate };
+                      if (metadata.media_type === "Video") {
+                        zipOptions.compression = "STORE";  // No compression for videos
+                      }
+
+                      zip.file(newFilename, fileData, zipOptions);
+                      metadata.files.push({
+                        path: newFilename,
+                        size: fileData.byteLength,
+                        type: isOverlay ? "overlay" : "main",
+                      });
+                    }
+                addLog(`  Extracted ${files.length} files from ZIP`, "success");
               }
             }
           } else {
@@ -3672,8 +3714,10 @@
             );
           }
 
-        // Mark as successful
-        metadata.status = "success";
+        // Mark as successful (unless deferred for later processing)
+        if (metadata.status !== "deferred") {
+          metadata.status = "success";
+        }
         delete metadata.error; // Remove any previous error
       } catch (error) {
         addLog(`  ERROR: ${error.message}`, "error");
