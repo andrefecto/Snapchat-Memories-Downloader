@@ -996,7 +996,7 @@
 
   <script>
     // Version number - automatically updated by GitHub Actions on tag push
-    const APP_VERSION = 'v1.3.0';
+    const APP_VERSION = 'v1.3.1';
     // Global resource load error listener for debugging 404s
     window.addEventListener('error', function (e) {
       try {
@@ -2121,26 +2121,8 @@
             "output.mp4",
           ];
         } else {
-          // overlay is a video
-          // Use simpler filter chain for Firefox
-          let filterComplex;
-          let preset = "medium";
-
-          // Use SIMPLEST possible filter for ALL browsers
-          // Complex filters (fps, setsar, loop, setpts) cause black screen in WASM FFmpeg
-          addLog('  Using simplified filter chain for WASM compatibility', 'info', 'ffmpeg');
-
-          if (mainWidth && mainHeight) {
-            // We have dimensions - use them
-            filterComplex = `[1:v]scale=${mainWidth}:${mainHeight}[ovr];[0:v][ovr]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[outv]`;
-            addLog(`  Scaling overlay to ${mainWidth}x${mainHeight}`, 'info', 'ffmpeg');
-          } else {
-            // No dimensions - overlay keeps its size
-            filterComplex = `[0:v][1:v]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[outv]`;
-            addLog('  Using overlay at original size (no scaling)', 'warning', 'ffmpeg');
-          }
-
-          preset = IS_FIREFOX ? "veryfast" : "medium";
+          // overlay is a video — use scale2ref to dynamically match dimensions
+          const preset = IS_FIREFOX ? "veryfast" : "ultrafast";
 
           args = [
             "-i",
@@ -2148,11 +2130,11 @@
             "-i",
             overlayFilename,
             "-filter_complex",
-            filterComplex,
+            "[0:v]fps=30,setsar=1[base];[1:v]fps=30,setsar=1,loop=loop=-1:size=32767:start=0,setpts=N/FRAME_RATE/TB[ovr_tmp];[ovr_tmp][base]scale2ref[ovr][base];[base][ovr]overlay=format=auto:shortest=1[outv]",
             "-map",
-            "[outv]", // Map the filtered video output
+            "[outv]",
             "-map",
-            "0:a?", // Map audio from main video
+            "0:a?",
             "-c:v",
             "libx264",
             "-preset",
@@ -2165,7 +2147,6 @@
             "copy",
             "-movflags",
             "+faststart",
-            "-shortest", // Stop at shortest input
             "-y",
             "output.mp4",
           ];

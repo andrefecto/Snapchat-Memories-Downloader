@@ -568,7 +568,7 @@
         await ffmpeg.deleteFile("output.mp4").catch(() => { });
 
         videosProcessedSinceReset++;
-        return outputData.buffer;
+        return outputData.slice().buffer;
       } catch (error) {
         await ffmpeg.deleteFile("main.mp4").catch(() => { });
         if (overlayFilename) await ffmpeg.deleteFile(overlayFilename).catch(() => { });
