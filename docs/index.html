@@ -996,7 +996,7 @@
 
   <script>
     // Version number - automatically updated by GitHub Actions on tag push
-    const APP_VERSION = 'v1.2.9';
+    const APP_VERSION = 'v1.3.0';
     // Global resource load error listener for debugging 404s
     window.addEventListener('error', function (e) {
       try {
@@ -1129,11 +1129,7 @@
         const { FFmpeg } = FFmpegWASM;
         ffmpegInstance = new FFmpeg();
 
-        // Detect browser
-        const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
-        const isChrome = navigator.userAgent.toLowerCase().indexOf('chrome') > -1;
-
-        if (isFirefox) {
+        if (IS_FIREFOX) {
           addLog('  ⚠️ Firefox detected: Video merging may be unstable due to WASM limitations', 'warning');
           addLog('  Recommendation: Use Chrome or Edge for best results', 'warning');
           addLog('Firefox browser detected - known WASM/FFmpeg compatibility issues', 'warning', 'ffmpeg');
@@ -1357,6 +1353,184 @@
         [minutes, 1],
         [Math.round(seconds * 100), 100],
       ];
+    }
+
+    // ── Utility Helpers ──
+
+    /** Trigger a browser download for a Blob */
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    /** Safely convert an error into a readable string */
+    function normalizeError(error) {
+      try {
+        return error && (error.message || String(error) || JSON.stringify(error));
+      } catch (e) {
+        return "Unknown error";
+      }
+    }
+
+    // Browser detection constants (computed once)
+    const IS_FIREFOX = navigator.userAgent.toLowerCase().includes('firefox');
+    const IS_CHROME = navigator.userAgent.toLowerCase().includes('chrome');
+
+    /**
+     * Extract main and overlay data from a ZIP's file entries.
+     * @param {JSZip} innerZip - loaded JSZip instance
+     * @param {string[]} files - list of filenames inside the ZIP
+     * @returns {Promise<{mainData, overlayData, mainName, overlayName}>}
+     */
+    async function extractZipMainAndOverlay(innerZip, files) {
+      let mainData = null, overlayData = null, mainName = null, overlayName = null;
+      for (const filename of files) {
+        const fileData = await innerZip.files[filename].async("arraybuffer");
+        if (filename.toLowerCase().includes("overlay")) {
+          overlayData = fileData;
+          overlayName = filename;
+        } else {
+          mainData = fileData;
+          mainName = filename;
+        }
+      }
+      return { mainData, overlayData, mainName, overlayName };
+    }
+
+    /**
+     * Detect overlay file extension and whether it's a static image.
+     * @param {string} overlayName - original filename from ZIP
+     * @param {ArrayBuffer} overlayData - overlay file bytes
+     * @returns {{ overlayExt: string, overlayIsImage: boolean }}
+     */
+    function detectOverlayType(overlayName, overlayData) {
+      let overlayExt = overlayName && overlayName.includes('.')
+        ? overlayName.substring(overlayName.lastIndexOf('.'))
+        : null;
+      const detected = detectFileExtension(new Uint8Array(overlayData));
+      if (detected) overlayExt = detected;
+      if (!overlayExt) overlayExt = '.mp4';
+      const overlayExtNoDot = overlayExt.replace('.', '').toLowerCase();
+      // Static images only — WebP/GIF treated as video to preserve animation
+      const overlayIsImage = ['png', 'jpg', 'jpeg'].includes(overlayExtNoDot);
+      return { overlayExt, overlayIsImage };
+    }
+
+    /**
+     * Save ZIP entries as separate files (fallback when merge fails or is disabled).
+     * Handles EXIF for images and GPS metadata for videos, plus STORE compression for videos.
+     * @param {JSZip} targetZip - ZIP to add files into
+     * @param {JSZip} innerZip - source ZIP with the raw files
+     * @param {string[]} files - filenames inside innerZip
+     * @param {object} metadata - memory metadata object (mutated: .files pushed)
+     * @param {string} extension - default extension (e.g. ".jpg" or ".mp4")
+     * @param {boolean} useTimestampFilenames
+     * @param {string} fileNum - zero-padded file number
+     */
+    async function saveFilesSeparately(targetZip, innerZip, files, metadata, extension, useTimestampFilenames, fileNum) {
+      const fileDate = parseSnapchatDate(metadata.date);
+      for (const filename of files) {
+        let fileData = await innerZip.files[filename].async("arraybuffer");
+        const isOverlay = filename.toLowerCase().includes("overlay");
+
+        // Preserve original extension from inner filename if present
+        let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
+        if (!origExt) {
+          const detected = detectFileExtension(new Uint8Array(fileData));
+          origExt = detected || extension;
+        }
+
+        const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
+        const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
+        const newFilename = isOverlay
+          ? `${baseNameNoExt}-overlay${origExt}`
+          : `${baseNameNoExt}-main${origExt}`;
+
+        // Add EXIF metadata to images
+        if (metadata.media_type === "Image") {
+          fileData = await addExifMetadata(fileData, metadata.date, metadata.latitude, metadata.longitude);
+        }
+        // Add GPS/timestamp metadata to main video (not overlay)
+        if (metadata.media_type === "Video" && !isOverlay) {
+          fileData = await addVideoMetadata(fileData, metadata.date, metadata.latitude, metadata.longitude);
+        }
+
+        // Videos must use STORE (no compression) to prevent playback issues
+        const zipOptions = { date: fileDate };
+        if (metadata.media_type === "Video") {
+          zipOptions.compression = "STORE";
+        }
+
+        targetZip.file(newFilename, fileData, zipOptions);
+        metadata.files.push({
+          path: newFilename,
+          size: fileData.byteLength,
+          type: isOverlay ? "overlay" : "main",
+        });
+      }
+    }
+
+    /**
+     * Fetch a URL with retry logic for 500-series / 429 / network errors.
+     * @param {string} url
+     * @param {number} maxRetries
+     * @returns {Promise<ArrayBuffer>}
+     */
+    async function fetchWithRetry(url, maxRetries = 3) {
+      let lastError;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const response = await fetch(url);
+
+          if (!response.ok) {
+            const bodyText = await response.text().catch(() => "<no body>");
+            const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
+
+            if (shouldRetry && attempt < maxRetries) {
+              const isRateLimit = response.status >= 500;
+              const baseDelay = isRateLimit ? 2000 : 1000;
+              const maxDelay = 10000;
+              const waitTime = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+
+              const statusHint = isRateLimit ? ' (AWS rate limit)' : '';
+              addLog(`    HTTP ${response.status}${statusHint} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+              console.warn(`HTTP ${response.status} fetching ${url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              continue;
+            }
+
+            addLog(`    HTTP error ${response.status} while fetching memory file`, "error");
+            console.error(`HTTP ${response.status} fetching ${url}:`, bodyText);
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const blob = await response.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+
+          if (attempt > 1) {
+            addLog(`    ✓ Download succeeded on attempt ${attempt}`, "success");
+          }
+          return arrayBuffer;
+
+        } catch (error) {
+          lastError = error;
+          if (attempt < maxRetries && !(error.message?.startsWith('HTTP '))) {
+            const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+            addLog(`    Network error - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+            console.warn(`Network error fetching ${url}, retry ${attempt}/${maxRetries}:`, error);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw lastError || new Error('Download failed after retries');
     }
 
     // Detect common file extension from file bytes (Uint8Array)
@@ -1652,121 +1826,61 @@
     }
 
     /**
+     * Load an image from an ArrayBuffer, returning the HTMLImageElement.
+     * @param {ArrayBuffer} data - Image bytes
+     * @param {string} label - "main" or "overlay" (for error messages)
+     * @returns {Promise<HTMLImageElement>}
+     */
+    function loadImage(data, label) {
+      const format = detectFileExtension(new Uint8Array(data)) || 'unknown';
+      const mime = getImageMimeType(format);
+      const blob = new Blob([data], mime ? { type: mime } : undefined);
+      const url = URL.createObjectURL(blob);
+
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error(`Failed to load ${label} image (${format}) - browser rejected format or corrupt data`));
+        };
+        img.src = url;
+      });
+    }
+
+    /**
      * Merge overlay image on top of main image using Canvas API
      * @param {ArrayBuffer} mainData - Main image data
      * @param {ArrayBuffer} overlayData - Overlay image data
      * @returns {Promise<ArrayBuffer>} - Merged image as JPEG
      */
     async function mergeImageOverlay(mainData, overlayData) {
-      return new Promise((resolve, reject) => {
-        // Detect image formats for better error messages
-        const mainFormat = detectFileExtension(new Uint8Array(mainData)) || 'unknown';
-        const overlayFormat = detectFileExtension(new Uint8Array(overlayData)) || 'unknown';
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Image loading timeout (10s)')), 10000)
+      );
 
-        // Create blobs with proper MIME types if possible
-        const mainMime = getImageMimeType(mainFormat);
-        const overlayMime = getImageMimeType(overlayFormat);
+      const [mainImg, overlayImg] = await Promise.race([
+        Promise.all([loadImage(mainData, 'main'), loadImage(overlayData, 'overlay')]),
+        timeout
+      ]);
 
-        const mainBlob = new Blob([mainData], mainMime ? { type: mainMime } : undefined);
-        const overlayBlob = new Blob([overlayData], overlayMime ? { type: overlayMime } : undefined);
+      if (!mainImg.width || !mainImg.height || !overlayImg.width || !overlayImg.height) {
+        throw new Error(`Invalid image dimensions - main: ${mainImg.width}x${mainImg.height}, overlay: ${overlayImg.width}x${overlayImg.height}`);
+      }
 
-        // Create image URLs
-        const mainUrl = URL.createObjectURL(mainBlob);
-        const overlayUrl = URL.createObjectURL(overlayBlob);
+      const canvas = document.createElement("canvas");
+      canvas.width = mainImg.width;
+      canvas.height = mainImg.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Failed to get 2D context from canvas");
 
-        // Load main image
-        const mainImg = new Image();
-        const overlayImg = new Image();
+      ctx.drawImage(mainImg, 0, 0);
+      ctx.drawImage(overlayImg, 0, 0, canvas.width, canvas.height);
 
-        let mainLoaded = false;
-        let overlayLoaded = false;
-
-        // Timeout fallback - if images don't load in 10 seconds, fail
-        const timeout = setTimeout(() => {
-          URL.revokeObjectURL(mainUrl);
-          URL.revokeObjectURL(overlayUrl);
-          reject(new Error(`Image loading timeout - main: ${mainFormat}, overlay: ${overlayFormat}`));
-        }, 10000);
-
-        function tryMerge() {
-          if (!mainLoaded || !overlayLoaded) return;
-
-          clearTimeout(timeout);
-
-          try {
-            // Validate dimensions
-            if (!mainImg.width || !mainImg.height || !overlayImg.width || !overlayImg.height) {
-              throw new Error(`Invalid image dimensions - main: ${mainImg.width}x${mainImg.height}, overlay: ${overlayImg.width}x${overlayImg.height}`);
-            }
-
-            // Create canvas with main image dimensions
-            const canvas = document.createElement("canvas");
-            canvas.width = mainImg.width;
-            canvas.height = mainImg.height;
-            const ctx = canvas.getContext("2d");
-
-            if (!ctx) {
-              throw new Error("Failed to get 2D context from canvas");
-            }
-
-            // Draw main image
-            ctx.drawImage(mainImg, 0, 0);
-
-            // Draw overlay on top (scaled if needed)
-            ctx.drawImage(overlayImg, 0, 0, canvas.width, canvas.height);
-
-            // Convert to blob
-            canvas.toBlob(
-              (blob) => {
-                if (!blob) {
-                  URL.revokeObjectURL(mainUrl);
-                  URL.revokeObjectURL(overlayUrl);
-                  reject(new Error("Canvas toBlob failed - returned null"));
-                  return;
-                }
-
-                // Clean up URLs
-                URL.revokeObjectURL(mainUrl);
-                URL.revokeObjectURL(overlayUrl);
-
-                // Convert blob to arraybuffer
-                blob.arrayBuffer().then(resolve).catch(reject);
-              },
-              "image/jpeg",
-              0.95
-            );
-          } catch (error) {
-            URL.revokeObjectURL(mainUrl);
-            URL.revokeObjectURL(overlayUrl);
-            reject(error);
-          }
-        }
-
-        mainImg.onload = () => {
-          mainLoaded = true;
-          tryMerge();
-        };
-        mainImg.onerror = (event) => {
-          clearTimeout(timeout);
-          URL.revokeObjectURL(mainUrl);
-          URL.revokeObjectURL(overlayUrl);
-          reject(new Error(`Failed to load main image (${mainFormat}) - browser rejected format or corrupt data`));
-        };
-
-        overlayImg.onload = () => {
-          overlayLoaded = true;
-          tryMerge();
-        };
-        overlayImg.onerror = (event) => {
-          clearTimeout(timeout);
-          URL.revokeObjectURL(mainUrl);
-          URL.revokeObjectURL(overlayUrl);
-          reject(new Error(`Failed to load overlay image (${overlayFormat}) - browser rejected format or corrupt data`));
-        };
-
-        mainImg.src = mainUrl;
-        overlayImg.src = overlayUrl;
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((b) => b ? resolve(b) : reject(new Error("Canvas toBlob failed")), "image/jpeg", 0.95);
       });
+      return blob.arrayBuffer();
     }
 
     /**
@@ -2008,8 +2122,7 @@
           ];
         } else {
           // overlay is a video
-          // Detect Firefox and use simpler filter chain
-          const isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
+          // Use simpler filter chain for Firefox
           let filterComplex;
           let preset = "medium";
 
@@ -2019,15 +2132,15 @@
 
           if (mainWidth && mainHeight) {
             // We have dimensions - use them
-            filterComplex = `[1:v]scale=${mainWidth}:${mainHeight}[ovr];[0:v][ovr]overlay=shortest=1[outv]`;
+            filterComplex = `[1:v]scale=${mainWidth}:${mainHeight}[ovr];[0:v][ovr]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[outv]`;
             addLog(`  Scaling overlay to ${mainWidth}x${mainHeight}`, 'info', 'ffmpeg');
           } else {
             // No dimensions - overlay keeps its size
-            filterComplex = `[0:v][1:v]overlay=shortest=1[outv]`;
+            filterComplex = `[0:v][1:v]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[outv]`;
             addLog('  Using overlay at original size (no scaling)', 'warning', 'ffmpeg');
           }
 
-          preset = isFirefox ? "veryfast" : "medium";
+          preset = IS_FIREFOX ? "veryfast" : "medium";
 
           args = [
             "-i",
@@ -2122,13 +2235,7 @@
           // Ignore cleanup errors
         }
 
-        // Normalize error message
-        let errorMsg = "";
-        try {
-          errorMsg = error && (error.message || String(error) || JSON.stringify(error));
-        } catch (e) {
-          errorMsg = "Unknown error";
-        }
+        const errorMsg = normalizeError(error);
 
         // Check for memory-related errors - force FFmpeg reset
         if (errorMsg.includes('memory access out of bounds') ||
@@ -2460,14 +2567,7 @@
         throw error; // Re-throw other errors
       }
 
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadBlob(zipBlob, filename);
 
       addLog(`✅ Progress saved to ${filename}`, "success");
       addLog("You can resume later by uploading this metadata.json file", "info");
@@ -2881,14 +2981,7 @@
       }
 
       // Download the ZIP file
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadBlob(zipBlob, filename);
 
       addLog(`  ✓ Downloaded: ${filename} (${formatBytes(zipBlob.size)})`, "success");
     }
@@ -2942,34 +3035,10 @@
 
         try {
           // Extract main and overlay files from the ZIP we saved earlier
-          let mainData = null;
-          let overlayData = null;
-          let mainName = null;
-          let overlayName = null;
-
-          for (const filename of files) {
-            const fileData = await innerZip.files[filename].async("arraybuffer");
-            if (filename.toLowerCase().includes("overlay")) {
-              overlayData = fileData;
-              overlayName = filename;
-            } else {
-              mainData = fileData;
-              mainName = filename;
-            }
-          }
+          const { mainData, overlayData, mainName, overlayName } = await extractZipMainAndOverlay(innerZip, files);
 
           if (mainData && overlayData) {
-            // Determine overlay extension and whether it's an image
-            let overlayExt = overlayName && overlayName.includes('.')
-              ? overlayName.substring(overlayName.lastIndexOf('.'))
-              : null;
-            const detectedOverlayExt = detectFileExtension(new Uint8Array(overlayData));
-            if (detectedOverlayExt) overlayExt = detectedOverlayExt;
-            if (!overlayExt) overlayExt = '.mp4';
-            const overlayExtNoDot = overlayExt.replace('.', '').toLowerCase();
-            // Treat WebP and GIF as video to preserve animation frames
-            // Static images: PNG, JPG, JPEG only
-            const overlayIsImage = ['png', 'jpg', 'jpeg'].includes(overlayExtNoDot);
+            const { overlayExt, overlayIsImage } = detectOverlayType(overlayName, overlayData);
 
             addLog(`  Merging video overlay (this may take a minute)...`, "info");
 
@@ -3016,7 +3085,7 @@
               // Download the ZIP
               const zipFilename = `snapchat-memories-deferred-video-${metadata.number}.zip`;
               const zipBlob = await videoZip.generateAsync({ type: "blob" });
-              saveAs(zipBlob, zipFilename);
+              downloadBlob(zipBlob, zipFilename);
               addLog(`  Downloaded: ${zipFilename}`, "success");
               metadata.status = "success";
               continue;  // Move to next deferred video
@@ -3080,14 +3149,7 @@
             }
 
             // Download
-            const url = URL.createObjectURL(zipBlob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = zipFilename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            downloadBlob(zipBlob, zipFilename);
 
             addLog(`  ✓ Downloaded: ${zipFilename} (${formatBytes(zipBlob.size)})`, "success");
             metadata.status = "success";
@@ -3100,12 +3162,7 @@
             throw new Error("Missing main or overlay video file");
           }
         } catch (error) {
-          let errorMsg = "";
-          try {
-            errorMsg = error && (error.message || String(error) || JSON.stringify(error));
-          } catch (e) {
-            errorMsg = "Unknown error";
-          }
+          const errorMsg = normalizeError(error);
 
           addLog(`  ERROR: Failed to merge deferred video (${errorMsg})`, "error");
           console.error("Failed to merge deferred video", error);
@@ -3146,71 +3203,7 @@
         addLog(`    Fetching memory file...`, "info");
         console.log("Fetching:", metadata.url);
 
-        // Retry logic for handling intermittent 500 errors
-        const maxRetries = 3;
-        let arrayBuffer;
-        let lastError;
-
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          try {
-            const response = await fetch(metadata.url);
-
-            if (!response.ok) {
-              const bodyText = await response.text().catch(() => "<no body>");
-
-              // Retry on 500-series errors (server errors) and 429 (rate limit)
-              const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
-
-              if (shouldRetry && attempt < maxRetries) {
-                // Use longer backoff for 500 errors (likely rate limits from AWS)
-                // Rate limit backoff: 2s, 5s, 10s
-                // Other retryable errors: 1s, 2s, 4s
-                const isRateLimit = response.status >= 500;
-                const baseDelay = isRateLimit ? 2000 : 1000;
-                const maxDelay = isRateLimit ? 10000 : 10000;
-                const waitTime = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
-
-                const statusHint = isRateLimit ? ' (AWS rate limit)' : '';
-                addLog(`    HTTP ${response.status}${statusHint} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
-                console.warn(`HTTP ${response.status} fetching ${metadata.url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                continue; // Retry
-              }
-
-              // Non-retryable error or max retries exceeded
-              addLog(`    HTTP error ${response.status} while fetching memory file`, "error");
-              console.error(`HTTP ${response.status} fetching ${metadata.url}:`, bodyText);
-              throw new Error(`HTTP ${response.status}`);
-            }
-
-            // Success - get the data
-            const blob = await response.blob();
-            arrayBuffer = await blob.arrayBuffer();
-
-            if (attempt > 1) {
-              addLog(`    ✓ Download succeeded on attempt ${attempt}`, "success");
-            }
-            break; // Success, exit retry loop
-
-          } catch (error) {
-            lastError = error;
-
-            // Network errors (not HTTP errors) - retry
-            if (attempt < maxRetries && !(error.message?.startsWith('HTTP '))) {
-              const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-              addLog(`    Network error - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
-              console.warn(`Network error fetching ${metadata.url}, retry ${attempt}/${maxRetries}:`, error);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-              continue; // Retry
-            }
-
-            throw error; // Re-throw if max retries or HTTP error
-          }
-        }
-
-        if (!arrayBuffer) {
-          throw lastError || new Error('Download failed after retries');
-        }
+        const arrayBuffer = await fetchWithRetry(metadata.url);
 
         // Validate downloaded content
         if (arrayBuffer.byteLength < 100) {
@@ -3289,23 +3282,7 @@
               if (isImage) {
                 try {
                   // Get main and overlay files
-                  let mainData = null;
-                  let overlayData = null;
-                  let mainName = null;
-                  let overlayName = null;
-
-                  for (const filename of files) {
-                    const fileData = await innerZip.files[filename].async(
-                      "arraybuffer"
-                    );
-                    if (filename.toLowerCase().includes("overlay")) {
-                      overlayData = fileData;
-                      overlayName = filename;
-                    } else {
-                      mainData = fileData;
-                      mainName = filename;
-                    }
-                  }
+                  const { mainData, overlayData, mainName, overlayName } = await extractZipMainAndOverlay(innerZip, files);
 
                   if (mainData && overlayData) {
                     // Merge the images
@@ -3342,13 +3319,7 @@
                     throw new Error("Missing main or overlay file");
                   }
                 } catch (error) {
-                  // Normalize error
-                  let errorMsg = "";
-                  try {
-                    errorMsg = error && (error.message || String(error) || JSON.stringify(error));
-                  } catch (e) {
-                    errorMsg = "Unknown error";
-                  }
+                  const errorMsg = normalizeError(error);
                   addLog(
                     `  Warning: Failed to merge overlay (${errorMsg}), saving separately`,
                     "info"
@@ -3366,49 +3337,8 @@
                   }
                   if (error && error.stack) addLog(`    Stack: ${error.stack}`, "info");
                   // Fall back to saving separately
-                  const fileDate = parseSnapchatDate(metadata.date);
-                  for (const filename of files) {
-                    let fileData = await innerZip.files[filename].async(
-                      "arraybuffer"
-                    );
-                    const isOverlay = filename
-                      .toLowerCase()
-                      .includes("overlay");
-                    // Preserve original extension if present in inner filename
-                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
-                    if (!origExt) {
-                      const detected = detectFileExtension(new Uint8Array(fileData));
-                      origExt = detected || extension;
-                    }
-                    // Generate base filename and add -main/-overlay suffix
-                    const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
-                    const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
-                    const newFilename = isOverlay
-                      ? `${baseNameNoExt}-overlay${origExt}`
-                      : `${baseNameNoExt}-main${origExt}`;
-
-                    // Add EXIF metadata to images
-                    if (metadata.media_type === "Image") {
-                      fileData = await addExifMetadata(
-                        fileData,
-                        metadata.date,
-                        metadata.latitude,
-                        metadata.longitude
-                      );
-                    }
-
-                    zip.file(newFilename, fileData, { date: fileDate });
-                    addLog(`    Saved extracted file: ${newFilename} (${formatBytes(fileData.byteLength)})`, "info");
-                    metadata.files.push({
-                      path: newFilename,
-                      size: fileData.byteLength,
-                      type: isOverlay ? "overlay" : "main",
-                    });
-                  }
-                  addLog(
-                    `  Extracted ${files.length} files from ZIP`,
-                    "success"
-                  );
+                  await saveFilesSeparately(zip, innerZip, files, metadata, extension, useTimestampFilenames, fileNum);
+                  addLog(`  Extracted ${files.length} files from ZIP`, "success");
                 }
               } else if (isVideo) {
                 try {
@@ -3418,37 +3348,10 @@
                   );
 
                   // Get main and overlay files (preserve original filenames/extensions)
-                  let mainData = null;
-                  let overlayData = null;
-                  let mainName = null;
-                  let overlayName = null;
-
-                  for (const filename of files) {
-                    const fileData = await innerZip.files[filename].async(
-                      "arraybuffer"
-                    );
-                    if (filename.toLowerCase().includes("overlay")) {
-                      overlayData = fileData;
-                      overlayName = filename;
-                    } else {
-                      mainData = fileData;
-                      mainName = filename;
-                    }
-                  }
+                  const { mainData, overlayData, mainName, overlayName } = await extractZipMainAndOverlay(innerZip, files);
 
                   if (mainData && overlayData) {
-                    // Determine overlay extension and whether it's an image
-                    let overlayExt = overlayName && overlayName.includes('.')
-                      ? overlayName.substring(overlayName.lastIndexOf('.'))
-                      : null;
-                    // Try to detect from data if no extension or ambiguous
-                    const detectedOverlayExt = detectFileExtension(new Uint8Array(overlayData));
-                    if (detectedOverlayExt) overlayExt = detectedOverlayExt;
-                    if (!overlayExt) overlayExt = '.mp4';
-                    const overlayExtNoDot = overlayExt.replace('.', '').toLowerCase();
-                    // Treat WebP and GIF as video to preserve animation frames
-                    // Static images: PNG, JPG, JPEG only
-                    const overlayIsImage = ['png', 'jpg', 'jpeg'].includes(overlayExtNoDot);
+                    const { overlayExt, overlayIsImage } = detectOverlayType(overlayName, overlayData);
 
                     // Merge videos using FFmpeg.wasm (supports image overlay)
                     let mergedData = await mergeVideoOverlay(
@@ -3504,13 +3407,7 @@
                     throw new Error("Missing main or overlay video file");
                   }
                 } catch (error) {
-                  // Normalize the error into a readable message
-                  let errorMsg = "";
-                  try {
-                    errorMsg = error && (error.message || String(error) || JSON.stringify(error));
-                  } catch (e) {
-                    errorMsg = "Unknown error";
-                  }
+                  const errorMsg = normalizeError(error);
 
                   addLog(
                     `  Warning: Failed to merge video overlay (${errorMsg}), saving separately`,
@@ -3542,48 +3439,8 @@
                     addLog(`    Stack: ${error.stack}`, "info");
                   }
                   // Fall back to saving separately
-                  const fileDate = parseSnapchatDate(metadata.date);
-                  for (const filename of files) {
-                    let fileData = await innerZip.files[filename].async(
-                      "arraybuffer"
-                    );
-                    const isOverlay = filename
-                      .toLowerCase()
-                      .includes("overlay");
-                    let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
-                    if (!origExt) {
-                      const detected = detectFileExtension(new Uint8Array(fileData));
-                      origExt = detected || extension;
-                    }
-                    // Generate base filename and add -main/-overlay suffix
-                    const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
-                    const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
-                    const newFilename = isOverlay
-                      ? `${baseNameNoExt}-overlay${origExt}`
-                      : `${baseNameNoExt}-main${origExt}`;
-
-                    // Add GPS and timestamp metadata to main video file (not overlay)
-                    if (metadata.media_type === "Video" && !isOverlay) {
-                      fileData = await addVideoMetadata(
-                        fileData,
-                        metadata.date,
-                        metadata.latitude,
-                        metadata.longitude
-                      );
-                    }
-
-                    // Store videos uncompressed (this is video merge fallback path)
-                    zip.file(newFilename, fileData, { date: fileDate, compression: "STORE" });
-                    metadata.files.push({
-                      path: newFilename,
-                      size: fileData.byteLength,
-                      type: isOverlay ? "overlay" : "main",
-                    });
-                  }
-                  addLog(
-                    `  Extracted ${files.length} video files from ZIP`,
-                    "success"
-                  );
+                  await saveFilesSeparately(zip, innerZip, files, metadata, extension, useTimestampFilenames, fileNum);
+                  addLog(`  Extracted ${files.length} video files from ZIP`, "success");
                 }
               }
             } else {
@@ -3603,67 +3460,7 @@
                 metadata.status = "deferred";
               } else {
                 // Not deferred - add files to current ZIP
-                for (const filename of files) {
-                      let fileData = await innerZip.files[filename].async(
-                        "arraybuffer"
-                      );
-                      const isOverlay = filename.toLowerCase().includes("overlay");
-                      // Preserve original extension from the inner filename if present
-                      let origExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : null;
-                      if (!origExt) {
-                        const detected = detectFileExtension(new Uint8Array(fileData));
-                        origExt = detected || extension;
-                      }
-                      // Generate base filename and add -main/-overlay suffix
-                      const baseFilename = generateFilename(metadata.date, origExt, useTimestampFilenames, fileNum);
-                      const baseNameNoExt = baseFilename.substring(0, baseFilename.lastIndexOf('.'));
-                      const newFilename = isOverlay
-                        ? `${baseNameNoExt}-overlay${origExt}`
-                        : `${baseNameNoExt}-main${origExt}`;
-
-                      // Add EXIF metadata to images
-                      if (metadata.media_type === "Image") {
-                        fileData = await addExifMetadata(
-                          fileData,
-                          metadata.date,
-                          metadata.latitude,
-                          metadata.longitude
-                        );
-                      }
-
-                      // Add GPS and timestamp metadata to main video file (not overlay)
-                      if (metadata.media_type === "Video" && !isOverlay) {
-                        fileData = await addVideoMetadata(
-                          fileData,
-                          metadata.date,
-                          metadata.latitude,
-                          metadata.longitude
-                        );
-                      }
-
-                      // Store videos uncompressed to prevent browser playback issues
-                      // CRITICAL: Videos MUST use compression: "STORE" (no compression)
-                      //
-                      // Why no compression for videos?
-                      // - MP4/video files are ALREADY compressed (H.264, H.265, etc.)
-                      // - ZIP DEFLATE compression on already-compressed data provides minimal benefit
-                      // - Some browser ZIP decoders BREAK when re-compressing video streams
-                      // - Symptoms: Video won't play, shows errors, or corrupted frames
-                      // - STORE mode = no compression = direct copy into ZIP (safe, fast)
-                      //
-                      // Images can use DEFLATE compression (default) without issues
-                      const zipOptions = { date: fileDate };
-                      if (metadata.media_type === "Video") {
-                        zipOptions.compression = "STORE";  // No compression for videos
-                      }
-
-                      zip.file(newFilename, fileData, zipOptions);
-                      metadata.files.push({
-                        path: newFilename,
-                        size: fileData.byteLength,
-                        type: isOverlay ? "overlay" : "main",
-                      });
-                    }
+                await saveFilesSeparately(zip, innerZip, files, metadata, extension, useTimestampFilenames, fileNum);
                 addLog(`  Extracted ${files.length} files from ZIP`, "success");
               }
             }
