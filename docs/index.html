@@ -996,7 +996,7 @@
 
   <script>
     // Version number - automatically updated by GitHub Actions on tag push
-    const APP_VERSION = 'v1.3.1';
+    const APP_VERSION = 'v1.3.2';
     // Global resource load error listener for debugging 404s
     window.addEventListener('error', function (e) {
       try {
@@ -1477,55 +1477,198 @@
     }
 
     /**
-     * Fetch a URL with retry logic for 500-series / 429 / network errors.
+     * Fetch a URL using the Fetch API with explicit CORS options.
      * @param {string} url
-     * @param {number} maxRetries
+     * @returns {Promise<ArrayBuffer>}
+     * @throws {Error} 'RETRY_HTTP_xxx' for retryable errors, 'HTTP xxx' for terminal errors
+     */
+    async function fetchViaFetchAPI(url) {
+      const response = await fetch(url, {
+        mode: 'cors',
+        credentials: 'omit',
+        redirect: 'follow',
+      });
+
+      if (!response.ok) {
+        const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
+        if (shouldRetry) {
+          throw new Error(`RETRY_HTTP_${response.status}`);
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      return blob.arrayBuffer();
+    }
+
+    /**
+     * Fetch a URL using XMLHttpRequest (matches Snapchat's own download code).
+     * XHR handles redirects internally and may succeed where fetch fails on Firefox
+     * due to CORS redirect differences.
+     * @param {string} url
+     * @returns {Promise<ArrayBuffer>}
+     * @throws {Error} 'RETRY_HTTP_xxx' for retryable errors, 'HTTP xxx' for terminal errors
+     */
+    function fetchViaXHR(url) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url, true);
+        xhr.setRequestHeader('X-Snap-Route-Tag', 'mem-dmd');
+        xhr.responseType = 'arraybuffer';
+        xhr.timeout = 60000;
+
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            resolve(xhr.response);
+          } else {
+            const shouldRetry = (xhr.status >= 500 && xhr.status < 600) || xhr.status === 429;
+            reject(new Error(shouldRetry ? `RETRY_HTTP_${xhr.status}` : `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = function () {
+          reject(new Error('XHR network error'));
+        };
+        xhr.ontimeout = function () {
+          reject(new Error('XHR timeout'));
+        };
+        xhr.send();
+      });
+    }
+
+    /**
+     * Fetch a URL using the POST flow (for non-GET Snapchat URLs).
+     * Step 1: POST query params to base URL to receive CDN URL
+     * Step 2: Fetch file from CDN URL
+     * @param {string} url - Full URL with query string
      * @returns {Promise<ArrayBuffer>}
      */
-    async function fetchWithRetry(url, maxRetries = 3) {
+    async function fetchViaPost(url) {
+      const [baseUrl, queryString] = url.split('?');
+
+      // Step 1: POST to get CDN URL
+      const cdnUrl = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', baseUrl, true);
+        xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+        xhr.timeout = 60000;
+
+        xhr.onload = function () {
+          if (xhr.status === 200) {
+            resolve(xhr.responseText.trim());
+          } else {
+            const shouldRetry = (xhr.status >= 500 && xhr.status < 600) || xhr.status === 429;
+            reject(new Error(shouldRetry ? `RETRY_HTTP_${xhr.status}` : `HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = function () {
+          reject(new Error('POST network error'));
+        };
+        xhr.ontimeout = function () {
+          reject(new Error('POST timeout'));
+        };
+        xhr.send(queryString || '');
+      });
+
+      // Step 2: Fetch file from CDN URL
+      const response = await fetch(cdnUrl, {
+        mode: 'cors',
+        credentials: 'omit',
+        redirect: 'follow',
+      });
+
+      if (!response.ok) {
+        const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
+        if (shouldRetry) {
+          throw new Error(`RETRY_HTTP_${response.status}`);
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      return blob.arrayBuffer();
+    }
+
+    /**
+     * Fetch a URL with retry logic for 500-series / 429 / network errors.
+     * Uses browser-aware strategy: XHR first on Firefox, Fetch API first on Chrome.
+     * Supports POST flow for non-GET Snapchat URLs.
+     * @param {string} url
+     * @param {number} maxRetries
+     * @param {boolean} isGetRequest - Whether this is a GET URL (true) or POST URL (false)
+     * @returns {Promise<ArrayBuffer>}
+     */
+    async function fetchWithRetry(url, maxRetries = 3, isGetRequest = true) {
       let lastError;
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          const response = await fetch(url);
+          let arrayBuffer;
 
-          if (!response.ok) {
-            const bodyText = await response.text().catch(() => "<no body>");
-            const shouldRetry = (response.status >= 500 && response.status < 600) || response.status === 429;
-
-            if (shouldRetry && attempt < maxRetries) {
-              const isRateLimit = response.status >= 500;
-              const baseDelay = isRateLimit ? 2000 : 1000;
-              const maxDelay = 10000;
-              const waitTime = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
-
-              const statusHint = isRateLimit ? ' (AWS rate limit)' : '';
-              addLog(`    HTTP ${response.status}${statusHint} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
-              console.warn(`HTTP ${response.status} fetching ${url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-              continue;
+          if (!isGetRequest) {
+            // POST URL: two-step flow (POST to get CDN URL, then GET file)
+            arrayBuffer = await fetchViaPost(url);
+          } else if (IS_FIREFOX) {
+            // Firefox: try XHR first (handles redirects internally, avoids CORS issues),
+            // fall back to Fetch API
+            try {
+              arrayBuffer = await fetchViaXHR(url);
+            } catch (xhrErr) {
+              if (xhrErr.message?.startsWith('HTTP ')) throw xhrErr; // Terminal HTTP error
+              console.warn(`XHR failed (attempt ${attempt}), trying Fetch API:`, xhrErr.message);
+              arrayBuffer = await fetchViaFetchAPI(url);
             }
-
-            addLog(`    HTTP error ${response.status} while fetching memory file`, "error");
-            console.error(`HTTP ${response.status} fetching ${url}:`, bodyText);
-            throw new Error(`HTTP ${response.status}`);
+          } else {
+            // Chrome/other: try Fetch API first, fall back to XHR
+            try {
+              arrayBuffer = await fetchViaFetchAPI(url);
+            } catch (fetchErr) {
+              if (fetchErr.message?.startsWith('HTTP ')) throw fetchErr; // Terminal HTTP error
+              console.warn(`Fetch API failed (attempt ${attempt}), trying XHR:`, fetchErr.message);
+              arrayBuffer = await fetchViaXHR(url);
+            }
           }
 
-          const blob = await response.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-
           if (attempt > 1) {
-            addLog(`    ✓ Download succeeded on attempt ${attempt}`, "success");
+            addLog(`    Download succeeded on attempt ${attempt}`, "success");
           }
           return arrayBuffer;
 
         } catch (error) {
           lastError = error;
-          if (attempt < maxRetries && !(error.message?.startsWith('HTTP '))) {
+
+          // Extract HTTP status from RETRY_HTTP_xxx errors
+          const retryMatch = error.message?.match(/^RETRY_HTTP_(\d+)$/);
+          if (retryMatch && attempt < maxRetries) {
+            const status = parseInt(retryMatch[1]);
+            const isRateLimit = status >= 500;
+            const baseDelay = isRateLimit ? 2000 : 1000;
+            const maxDelay = 10000;
+            const waitTime = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+
+            const statusHint = isRateLimit ? ' (AWS rate limit)' : '';
+            addLog(`    HTTP ${status}${statusHint} - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
+            console.warn(`HTTP ${status} fetching ${url}, retry ${attempt}/${maxRetries} in ${waitTime}ms`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            continue;
+          }
+
+          // Terminal HTTP errors (non-retryable)
+          if (error.message?.startsWith('HTTP ')) {
+            addLog(`    HTTP error ${error.message.slice(5)} while fetching memory file`, "error");
+            throw error;
+          }
+
+          // Network errors: retry with backoff
+          if (attempt < maxRetries) {
             const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
             addLog(`    Network error - Retrying in ${waitTime/1000}s (attempt ${attempt}/${maxRetries})`, "warning");
             console.warn(`Network error fetching ${url}, retry ${attempt}/${maxRetries}:`, error);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             continue;
+          }
+
+          // Final failure on Firefox: log actionable guidance
+          if (IS_FIREFOX) {
+            addLog(`    Firefox download failed: Check that Enhanced Tracking Protection is not blocking Snapchat CDN requests. If errors persist, try using Chrome/Chromium.`, "error");
           }
           throw error;
         }
@@ -2459,9 +2602,19 @@
 
           if (dateCell.includes("UTC") && link) {
             const onclickAttr = link.getAttribute("onclick");
-            const urlMatch = onclickAttr
-              ? onclickAttr.match(/downloadMemories\('([^']+)'/)
+            // Try full format first: downloadMemories('URL', this, true/false)
+            let urlMatch = onclickAttr
+              ? onclickAttr.match(/downloadMemories\('([^']+)',\s*this,\s*(true|false)\)/)
               : null;
+            let isGetRequest = true;
+            if (urlMatch) {
+              isGetRequest = urlMatch[2] === 'true';
+            } else {
+              // Fallback for older exports: downloadMemories('URL')
+              urlMatch = onclickAttr
+                ? onclickAttr.match(/downloadMemories\('([^']+)'/)
+                : null;
+            }
 
             if (urlMatch) {
               const locationMatch = locationCell.match(
@@ -2474,6 +2627,7 @@
                 latitude: locationMatch ? locationMatch[1] : "Unknown",
                 longitude: locationMatch ? locationMatch[2] : "Unknown",
                 url: urlMatch[1],
+                isGetRequest: isGetRequest,
               });
             }
           }
@@ -2572,6 +2726,10 @@
       // Log system information for debugging
       logSystemInfo();
 
+      if (IS_FIREFOX) {
+        addLog("Firefox detected: Using enhanced download compatibility mode (XHR + POST support)", "info");
+      }
+
       // Capture timestamp filename setting
       const useTimestampFilenames = document.getElementById("timestampFilenamesCheckbox").checked;
 
@@ -2604,6 +2762,7 @@
             latitude: memory.latitude,
             longitude: memory.longitude,
             url: memory.url,
+            isGetRequest: memory.isGetRequest ?? true,
             status: "pending",
             files: [],
           });
@@ -2639,6 +2798,7 @@
               latitude: memory.latitude,
               longitude: memory.longitude,
               url: memory.url,
+              isGetRequest: memory.isGetRequest ?? existing.isGetRequest ?? true,
               status: existing.status || "pending",
               files: existing.files || [],
               error: existing.error, // Preserve error if it exists
@@ -2653,6 +2813,7 @@
               latitude: memory.latitude,
               longitude: memory.longitude,
               url: memory.url,
+              isGetRequest: memory.isGetRequest ?? true,
               status: "pending",
               files: [],
             });
@@ -3184,7 +3345,7 @@
         addLog(`    Fetching memory file...`, "info");
         console.log("Fetching:", metadata.url);
 
-        const arrayBuffer = await fetchWithRetry(metadata.url);
+        const arrayBuffer = await fetchWithRetry(metadata.url, 3, metadata.isGetRequest ?? true);
 
         // Validate downloaded content
         if (arrayBuffer.byteLength < 100) {

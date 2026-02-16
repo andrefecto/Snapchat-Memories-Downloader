@@ -133,10 +133,17 @@ class MemoriesParser(HTMLParser):
             # Format: onclick="downloadMemories('https://...', ...)"
             for attr_name, attr_value in attrs:
                 if attr_name == 'onclick' and attr_value and 'downloadMemories' in attr_value:
-                    # Use regex to extract URL from JavaScript function call
-                    url_match = re.search(r"downloadMemories\('([^']+)'", attr_value)
-                    if url_match:
-                        self.current_row['url'] = url_match.group(1)
+                    # Try full format: downloadMemories('URL', this, true/false)
+                    full_match = re.search(r"downloadMemories\('([^']+)',\s*this,\s*(true|false)\)", attr_value)
+                    if full_match:
+                        self.current_row['url'] = full_match.group(1)
+                        self.current_row['is_get_request'] = full_match.group(2) == 'true'
+                    else:
+                        # Fallback for older exports: downloadMemories('URL')
+                        url_match = re.search(r"downloadMemories\('([^']+)'", attr_value)
+                        if url_match:
+                            self.current_row['url'] = url_match.group(1)
+                            self.current_row['is_get_request'] = True
 
     def handle_data(self, data):
         """
@@ -769,7 +776,8 @@ def download_and_extract(
     overlays_only: bool = False,
     use_timestamp_filenames: bool = False,
     check_duplicates: bool = False,
-    use_local_timezone: bool = False
+    use_local_timezone: bool = False,
+    is_get_request: bool = True
 ) -> list:
     """
     Download and process a single memory file from Snapchat CDN.
@@ -805,6 +813,8 @@ def download_and_extract(
         use_timestamp_filenames: If True, use YYYY.MM.DD-HH-MM-SS.ext naming
         check_duplicates: If True, skip download if identical file exists
         use_local_timezone: If True, convert UTC to local timezone in EXIF/metadata
+        is_get_request: If True, use GET request; if False, use POST flow (POST to
+            get CDN URL, then GET file from CDN)
 
     Returns:
         List of dicts with file info: [{'path': str, 'size': int, 'type': str}]
@@ -817,8 +827,20 @@ def download_and_extract(
     }
 
     # Download file from Snapchat CDN
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
+    if is_get_request:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+    else:
+        # POST flow: split URL at ?, POST query string to base URL to get CDN URL
+        parts = url.split('?', 1)
+        base_url = parts[0]
+        query_string = parts[1] if len(parts) > 1 else ''
+        post_headers = {**headers, 'Content-type': 'application/x-www-form-urlencoded'}
+        post_response = requests.post(base_url, data=query_string, headers=post_headers, timeout=30)
+        post_response.raise_for_status()
+        cdn_url = post_response.text.strip()
+        response = requests.get(cdn_url, headers=headers, timeout=30)
+        response.raise_for_status()
 
     content = response.content
     files_saved = []
@@ -1736,6 +1758,7 @@ def initialize_metadata(memories: list, output_path: Path) -> list:
             'latitude': memory.get('latitude', 'Unknown'),
             'longitude': memory.get('longitude', 'Unknown'),
             'url': memory.get('url', ''),
+            'is_get_request': memory.get('is_get_request', True),
             'status': 'pending',
             'files': []
         })
@@ -2001,7 +2024,8 @@ def download_all_memories(
                     overlays_only,
                     use_timestamp_filenames,
                     remove_duplicates,
-                    use_local_timezone
+                    use_local_timezone,
+                    memory.get('is_get_request', True)
                 )
 
                 # Check if file was skipped due to overlays_only mode
@@ -2071,7 +2095,8 @@ def download_all_memories(
                     overlays_only,
                     use_timestamp_filenames,
                     remove_duplicates,
-                    use_local_timezone
+                    use_local_timezone,
+                    memory.get('is_get_request', True)
                 )
 
                 if len(files_saved) == 0:
@@ -2460,7 +2485,8 @@ if __name__ == '__main__':
                     False,  # overlays_only not used in test mode
                     timestamp_filenames_mode,
                     remove_duplicates_mode,
-                    local_timezone_mode
+                    local_timezone_mode,
+                    memory.get('is_get_request', True)
                 )
 
                 if len(files_saved) > 1:
