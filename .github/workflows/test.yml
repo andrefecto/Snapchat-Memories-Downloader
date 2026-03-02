@@ -57,7 +57,7 @@ jobs:
         pytest test_download_memories.py --cov=download_memories --cov-report=term --cov-report=html
 
     - name: Upload coverage report
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       if: always()
       with:
         name: coverage-report-${{ matrix.os }}-py${{ matrix.python-version }}
