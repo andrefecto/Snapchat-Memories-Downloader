@@ -436,7 +436,7 @@ For merged overlays (when using `--merge-overlays` flag):
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.11+
 - `requests` library (installed automatically by setup.sh)
 - `Pillow` library (for overlay merging and EXIF metadata, installed automatically by setup.sh)
 - `piexif` library (for EXIF metadata embedding, installed automatically by setup.sh)
