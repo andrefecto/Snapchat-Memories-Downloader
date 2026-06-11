@@ -31,8 +31,14 @@ Before using this tool, you need to download your data from Snapchat:
    - Review all 8 types and select what you need
 5. Click **"Submit Request"**
 6. Wait for Snapchat to email you (can take 24-48 hours)
-7. Download the ZIP file from the email
-8. Extract it - you'll find `memories_history.html` in the `html/` folder
+7. Download the ZIP file(s) from the email
+8. Extract it - your media is in the `memories/` folder (new format) or you'll
+   find `memories_history.html` in the `html/` folder (older format)
+
+> ⏳ **Download promptly — exports now appear to expire ~3 days after you request
+> them.** Snapchat used to give ~7 days; recent exports seem to lapse in about 3.
+> Grab all the ZIP files as soon as the email arrives, or you may have to request
+> your data again. New exports can also be several GB split across multiple ZIPs.
 
 **Note:** Chat Media and Shared Stories used to be included with Memories,
 but are now separate options at the bottom of the list.
@@ -98,6 +104,12 @@ with its `-overlay`, merging them, and copying GPS/timestamps from
 Visit the [web version](https://andrefecto.github.io/Snapchat-Memories-Downloader/)
 and upload your `memories_history.html` file. Everything runs in your browser -
 your data never leaves your device!
+
+**New bundled-media export?** If your export has no "Download" links and the media
+is already inside a `memories` folder, click **"Choose Export Folder"** instead and
+select your unzipped export. The tool pairs `-main`/`-overlay` files, merges them in
+your browser, and downloads a single ZIP. (Very large libraries may hit browser
+memory limits — use the Python version for those.)
 
 ### Options
 
