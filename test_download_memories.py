@@ -26,7 +26,13 @@ from download_memories import (
     parse_html_file,
     get_timezone_from_gps,
     convert_utc_to_local,
-    timezone_support
+    timezone_support,
+    locate_export_layout,
+    parse_memories_json,
+    parse_gallery_main_order,
+    find_overlay_for_main,
+    build_local_memories,
+    process_local_export,
 )
 
 
@@ -875,6 +881,281 @@ class TestDuplicateDetection:
 
         assert is_dup is False
         assert dup_file is None
+
+
+# ============================================================================
+# New export format (2026+): locally-bundled media (GitHub issue #23)
+# ============================================================================
+
+def _write_png(path, color=(255, 0, 0), size=(64, 64), mode='RGB'):
+    """Write a small PNG to disk and return its raw bytes."""
+    from PIL import Image
+    img = Image.new(mode, size, color=color)
+    img.save(path, format='PNG')
+    return path
+
+
+def _build_new_export(root: Path, items):
+    """Create a synthetic new-format export under `root`.
+
+    items: list of dicts with keys: base (filename stem without -main),
+    ext (e.g. '.png'), date (UTC string), media_type, location, overlay (bool).
+    Returns the export root path.
+    """
+    (root / 'html').mkdir(parents=True, exist_ok=True)
+    (root / 'json').mkdir(parents=True, exist_ok=True)
+    media = root / 'memories'
+    media.mkdir(parents=True, exist_ok=True)
+
+    saved_media = []
+    gallery_blocks = []
+    for it in items:
+        main_name = f"{it['base']}-main{it['ext']}"
+        _write_png(media / main_name, color=(200, 50, 50))
+        if it.get('overlay'):
+            # Overlay is a semi-transparent PNG (matches Snapchat using PNG overlays)
+            _write_png(media / f"{it['base']}-overlay.png", color=(0, 0, 255), mode='RGBA')
+        media_tag = 'video' if it['media_type'] == 'Video' else 'img'
+        gallery_blocks.append(
+            f'<div class="image-container">'
+            f'<{media_tag} src=".//{main_name}"></{media_tag}>'
+            f'<div class="text-line">{it["date"].split(" ")[0]}</div>'
+            f'</div>'
+        )
+        saved_media.append({
+            "Date": it['date'],
+            "Media Type": it['media_type'],
+            "Location": it.get('location', ''),
+            "Download Link": "",
+            "Media Download Url": "",
+        })
+
+    (media / 'memories.html').write_text(
+        '<!DOCTYPE html><html><body><div>' + ''.join(gallery_blocks) + '</div></body></html>',
+        encoding='utf-8',
+    )
+    (root / 'json' / 'memories_history.json').write_text(
+        json.dumps({"Saved Media": saved_media}), encoding='utf-8'
+    )
+    return root
+
+
+class TestNewExportParsing:
+    """Parsing helpers for the new bundled-media export format."""
+
+    def test_parse_memories_json_normalizes_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jp = Path(tmp) / 'memories_history.json'
+            jp.write_text(json.dumps({"Saved Media": [
+                {"Date": "2026-05-13 05:03:26 UTC", "Media Type": "Video",
+                 "Location": "Latitude, Longitude: 41.322487, -105.57241",
+                 "Download Link": "", "Media Download Url": ""},
+                {"Date": "2026-05-14 10:00:00 UTC", "Media Type": "Image",
+                 "Location": "", "Download Link": "", "Media Download Url": ""},
+            ]}))
+            mems = parse_memories_json(jp)
+            assert len(mems) == 2
+            assert mems[0] == {
+                'date': "2026-05-13 05:03:26 UTC", 'media_type': 'Video',
+                'latitude': '41.322487', 'longitude': '-105.57241',
+            }
+            # Missing location degrades to 'Unknown', not a crash
+            assert mems[1]['latitude'] == 'Unknown'
+            assert mems[1]['longitude'] == 'Unknown'
+
+    def test_parse_gallery_main_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gp = Path(tmp) / 'memories.html'
+            gp.write_text(
+                '<div class="image-container"><video src=".//A_x-main.mp4"></video></div>'
+                '<div class="image-container"><img src=".//B_y-main.png"></div>'
+            )
+            assert parse_gallery_main_order(gp) == ['A_x-main.mp4', 'B_y-main.png']
+
+    def test_find_overlay_for_main_pairs_by_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp)
+            main = media / '2026-05-13_UUID-main.mp4'
+            main.write_bytes(b'x')
+            # Overlay uses a different extension than the main file
+            overlay = media / '2026-05-13_UUID-overlay.png'
+            overlay.write_bytes(b'y')
+            assert find_overlay_for_main(main) == overlay
+
+    def test_find_overlay_returns_none_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / '2026-05-13_UUID-main.mp4'
+            main.write_bytes(b'x')
+            assert find_overlay_for_main(main) is None
+
+    def test_locate_export_layout_detects_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_UUID', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 1.0, 2.0', 'overlay': False},
+            ])
+            layout = locate_export_layout(str(root))
+            assert layout is not None
+            assert layout['media_dir'].name == 'memories'
+            assert layout['gallery_html'] is not None
+            assert layout['json_file'] is not None
+
+    def test_locate_export_layout_from_inner_html_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_UUID', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': '', 'overlay': False},
+            ])
+            # Pointing at the bundled gallery file still resolves the export
+            layout = locate_export_layout(str(root / 'memories' / 'memories.html'))
+            assert layout is not None and layout['root'] == root
+
+    def test_locate_export_layout_rejects_non_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'random.txt').write_text('not an export')
+            assert locate_export_layout(tmp) is None
+
+    def test_build_local_memories_aligns_json_by_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_A', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 41.32, -105.57', 'overlay': True},
+                {'base': '2026-05-14_B', 'ext': '.png', 'date': '2026-05-14 10:00:00 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 11.0, 22.0', 'overlay': False},
+            ])
+            mems = build_local_memories(locate_export_layout(str(root)))
+            assert len(mems) == 2
+            assert mems[0]['date'] == '2026-05-13 05:03:26 UTC'
+            assert mems[0]['latitude'] == '41.32'
+            assert mems[0]['overlay_file'] is not None
+            assert mems[1]['overlay_file'] is None
+
+    def test_build_local_memories_falls_back_to_filename_date_when_no_date_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_A', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 41.32, -105.57', 'overlay': False},
+            ])
+            # JSON entries are for completely different dates - no date matches the file.
+            jp = root / 'json' / 'memories_history.json'
+            jp.write_text(json.dumps({"Saved Media": [
+                {"Date": "2099-01-01 00:00:00 UTC", "Media Type": "Image", "Location": ""},
+                {"Date": "2098-01-01 00:00:00 UTC", "Media Type": "Image", "Location": ""},
+            ]}))
+            mems = build_local_memories(locate_export_layout(str(root)))
+            assert len(mems) == 1
+            # GPS not matched, but timestamp derived from the filename's date prefix
+            assert mems[0]['date'].startswith('2026-05-13')
+            assert mems[0]['latitude'] == 'Unknown'
+
+    def test_build_local_memories_matches_by_date_when_json_reversed(self):
+        """Regression: real exports list JSON newest-first while files are oldest-first.
+
+        Positional alignment would attach every file the wrong GPS/time; matching by
+        date must stay correct, including same-date items consumed chronologically.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2025-06-20_a', 'ext': '.png', 'date': '2025-06-20 17:50:11 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 1.0, 1.0', 'overlay': False},
+                {'base': '2025-07-13_b', 'ext': '.png', 'date': '2025-07-13 10:00:00 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 2.0, 2.0', 'overlay': False},
+                {'base': '2025-07-13_c', 'ext': '.png', 'date': '2025-07-13 11:00:00 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 3.0, 3.0', 'overlay': False},
+                {'base': '2025-08-01_d', 'ext': '.png', 'date': '2025-08-01 09:00:00 UTC',
+                 'media_type': 'Image', 'location': 'Latitude, Longitude: 4.0, 4.0', 'overlay': False},
+            ])
+            # Snapchat orders the JSON newest-first - reverse it to reproduce reality.
+            jp = root / 'json' / 'memories_history.json'
+            data = json.loads(jp.read_text())
+            data['Saved Media'].reverse()
+            jp.write_text(json.dumps(data))
+
+            mems = build_local_memories(locate_export_layout(str(root)))
+            assert len(mems) == 4
+            # Files are in gallery order (chronological); each keeps its own GPS/time.
+            assert (mems[0]['date'], mems[0]['latitude']) == ('2025-06-20 17:50:11 UTC', '1.0')
+            # Same-date pair assigned chronologically (earlier time -> earlier gallery item)
+            assert (mems[1]['date'], mems[1]['latitude']) == ('2025-07-13 10:00:00 UTC', '2.0')
+            assert (mems[2]['date'], mems[2]['latitude']) == ('2025-07-13 11:00:00 UTC', '3.0')
+            assert (mems[3]['date'], mems[3]['latitude']) == ('2025-08-01 09:00:00 UTC', '4.0')
+
+
+class TestProcessLocalExport:
+    """End-to-end processing of a new-format export."""
+
+    def test_returns_false_for_non_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'foo.txt').write_text('x')
+            out = Path(tmp) / 'out'
+            assert process_local_export(tmp, output_dir=str(out)) is False
+
+    def test_image_overlay_merged_with_exif_and_metadata(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_A', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image',
+                 'location': 'Latitude, Longitude: 41.322487, -105.57241', 'overlay': True},
+            ])
+            out = Path(tmp) / 'out'
+            assert process_local_export(str(root), output_dir=str(out)) is True
+
+            # Merged output written without the -main suffix
+            produced = out / '2026-05-13_A.png'
+            assert produced.exists()
+            # Context manager closes the handle (Windows can't clean up an open file).
+            with Image.open(produced) as img:
+                assert img.size == (64, 64)
+
+            # Originals untouched
+            assert (root / 'memories' / '2026-05-13_A-main.png').exists()
+            assert (root / 'memories' / '2026-05-13_A-overlay.png').exists()
+
+            # metadata.json reflects a successful merge
+            meta = json.loads((out / 'metadata.json').read_text())
+            assert len(meta) == 1
+            assert meta[0]['status'] == 'success'
+            assert meta[0]['type'] == 'merged'
+            assert meta[0]['latitude'] == '41.322487'
+
+            # Capture date preserved as the file mtime (UTC)
+            expected = parse_date_to_timestamp('2026-05-13 05:03:26 UTC')
+            assert abs(produced.stat().st_mtime - expected) < 2
+
+    def test_image_without_overlay_is_copied_with_exif(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            pytest.skip("Pillow not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_A', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': '', 'overlay': False},
+            ])
+            out = Path(tmp) / 'out'
+            process_local_export(str(root), output_dir=str(out))
+            produced = out / '2026-05-13_A.png'
+            assert produced.exists()
+            meta = json.loads((out / 'metadata.json').read_text())
+            assert meta[0]['type'] == 'single'
+
+    def test_overlays_only_skips_memories_without_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _build_new_export(Path(tmp) / 'export', [
+                {'base': '2026-05-13_A', 'ext': '.png', 'date': '2026-05-13 05:03:26 UTC',
+                 'media_type': 'Image', 'location': '', 'overlay': True},
+                {'base': '2026-05-14_B', 'ext': '.png', 'date': '2026-05-14 10:00:00 UTC',
+                 'media_type': 'Image', 'location': '', 'overlay': False},
+            ])
+            out = Path(tmp) / 'out'
+            process_local_export(str(root), output_dir=str(out), overlays_only=True)
+            meta = json.loads((out / 'metadata.json').read_text())
+            assert len(meta) == 1
+            assert meta[0]['source_main'] == '2026-05-13_A-main.png'
 
 
 if __name__ == '__main__':

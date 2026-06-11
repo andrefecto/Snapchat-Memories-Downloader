@@ -32,6 +32,8 @@ import zipfile
 import io
 import subprocess
 import hashlib
+import shutil
+from collections import defaultdict, deque
 
 INVALID_FILENAME_CHARS = '<>:"/\\|?*'
 
@@ -1898,6 +1900,387 @@ def merge_existing_files(folder_path: str) -> None:
     print("\nNote: Original -main and -overlay files were NOT deleted")
 
 
+# ============================================================================
+# NEW EXPORT FORMAT (2026+) - locally-bundled media
+# ============================================================================
+# As of ~2026 Snapchat ships Memories already downloaded INSIDE the export
+# instead of providing per-row download URLs. The old html/memories_history.html
+# still exists, but its download column now reads "N/A" - which is why the
+# URL-based parser reports "No memories found" (GitHub issue #23).
+#
+# New export layout (after unzipping):
+#   <root>/index.html
+#   <root>/html/memories_history.html    (table; download column is now "N/A")
+#   <root>/json/memories_history.json    ({"Saved Media": [{Date, Media Type, Location, ...}]})
+#   <root>/memories/memories.html        (gallery referencing local files)
+#   <root>/memories/<YYYY-MM-DD>_<UUID>-main.<ext>   (+ optional matching -overlay)
+#
+# This path processes that local export with NO network access: it pairs each
+# -main file with its -overlay (filename convention, same as --merge-existing),
+# merges overlays (still the tool's core value-add - Snapchat ships them
+# UNmerged), and enriches EXIF/timestamps from json/memories_history.json.
+
+NEW_EXPORT_MEDIA_DIRNAME = 'memories'
+VIDEO_SUFFIXES = ('.mp4', '.mov', '.avi', '.m4v')
+
+
+def _media_type_from_suffix(suffix: str) -> str:
+    """Best-effort media type from a file extension."""
+    return 'Video' if suffix.lower() in VIDEO_SUFFIXES else 'Image'
+
+
+def _date_prefix_from_name(name: str) -> Optional[str]:
+    """Extract the leading YYYY-MM-DD date from a memory filename, if present."""
+    match = re.match(r'(\d{4}-\d{2}-\d{2})', name)
+    return match.group(1) if match else None
+
+
+def locate_export_layout(input_path: str) -> Optional[dict]:
+    """Locate the pieces of a new-format (bundled-media) Snapchat export.
+
+    Accepts a path to the export root, the memories/ folder, or any of the
+    bundled HTML files (index.html / memories.html / memories_history.html).
+
+    Returns {root, media_dir, gallery_html, json_file} if the path looks like a
+    new-format export (a folder containing *-main.* media files), else None.
+    """
+    p = Path(input_path)
+
+    # Build a list of candidate base directories to inspect.
+    candidates = []
+    if p.is_file():
+        candidates += [p.parent, p.parent.parent]
+    elif p.is_dir():
+        candidates += [p, p.parent]
+    else:
+        return None
+
+    for base in candidates:
+        if base is None:
+            continue
+        # The media directory is either a memories/ subfolder or the base itself,
+        # identified by the presence of at least one *-main.* file.
+        media_dir = None
+        for cand in (base / NEW_EXPORT_MEDIA_DIRNAME, base):
+            if cand.is_dir() and next(cand.glob('*-main.*'), None) is not None:
+                media_dir = cand
+                break
+        if media_dir is None:
+            continue
+
+        root = media_dir.parent if media_dir.name == NEW_EXPORT_MEDIA_DIRNAME else media_dir
+        gallery = media_dir / 'memories.html'
+        json_file = None
+        for cand in (
+            root / 'json' / 'memories_history.json',
+            root / 'memories_history.json',
+            media_dir / 'memories_history.json',
+        ):
+            if cand.is_file():
+                json_file = cand
+                break
+
+        return {
+            'root': root,
+            'media_dir': media_dir,
+            'gallery_html': gallery if gallery.is_file() else None,
+            'json_file': json_file,
+        }
+
+    return None
+
+
+def parse_memories_json(json_path: Path) -> list:
+    """Parse json/memories_history.json into normalized metadata dicts.
+
+    Output keys match the rest of the tool: date, media_type, latitude, longitude.
+    The new export leaves the download fields empty, so they are ignored here.
+    """
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  Warning: Could not read {json_path}: {e}")
+        return []
+
+    entries = data.get('Saved Media', []) if isinstance(data, dict) else []
+    memories = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        date = (entry.get('Date') or 'Unknown').strip() or 'Unknown'
+        media_type = (entry.get('Media Type') or 'Unknown').strip() or 'Unknown'
+        latitude = longitude = 'Unknown'
+        location = entry.get('Location') or ''
+        loc_match = re.search(r'Latitude,\s*Longitude:\s*([-\d.]+),\s*([-\d.]+)', location)
+        if loc_match:
+            latitude, longitude = loc_match.group(1), loc_match.group(2)
+        memories.append({
+            'date': date,
+            'media_type': media_type,
+            'latitude': latitude,
+            'longitude': longitude,
+        })
+    return memories
+
+
+def parse_gallery_main_order(gallery_html: Path) -> list:
+    """Return the ordered list of -main filenames referenced in memories.html.
+
+    This preserves the order in which Snapchat lists memories, which is used to
+    align local files with json/memories_history.json entries (the JSON has no
+    filename field). Only the *-main.* references are needed; overlays are paired
+    later by filename convention.
+    """
+    try:
+        text = gallery_html.read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return []
+    order = []
+    for match in re.finditer(r'src\s*=\s*"([^"]*?-main\.[^"]+)"', text):
+        order.append(os.path.basename(match.group(1)))
+    return order
+
+
+def find_overlay_for_main(main_file: Path) -> Optional[Path]:
+    """Find the -overlay file matching a -main file by shared base name.
+
+    e.g. 2026-05-13_<UUID>-main.mp4  ->  2026-05-13_<UUID>-overlay.png
+    The overlay may use a different extension (often .png for image overlays).
+    """
+    name = main_file.name
+    marker = '-main'
+    if marker not in name:
+        return None
+    base = name[:name.rindex(marker)]  # date + UUID portion (no glob metachars)
+    return next(iter(sorted(main_file.parent.glob(f'{base}-overlay.*'))), None)
+
+
+def build_local_memories(layout: dict) -> list:
+    """Build the ordered list of memories to process from a new-format export.
+
+    Each item: {main_file, overlay_file, date, media_type, latitude, longitude}.
+
+    Files are ordered by the gallery (memories.html, chronological) when available,
+    else by filename. Each file is matched to a JSON metadata entry that shares its
+    capture DATE (the JSON has no filename field, and - importantly - its entries are
+    ordered newest-first while the gallery/files are oldest-first, so positional
+    alignment would mismatch everything). Matching by date is direction-agnostic:
+    within a date, entries are consumed in chronological order, which lines up with
+    the gallery's chronological order. Files with no matching JSON entry fall back to
+    the filename's date (no GPS), so timestamps stay correct regardless.
+    """
+    media_dir = layout['media_dir']
+    main_files = sorted(media_dir.glob('*-main.*'))
+    by_name = {f.name: f for f in main_files}
+
+    # Order main files by the gallery first, then append any not referenced there.
+    ordered_mains = []
+    seen = set()
+    if layout['gallery_html']:
+        for name in parse_gallery_main_order(layout['gallery_html']):
+            f = by_name.get(name)
+            if f is not None and f.name not in seen:
+                ordered_mains.append(f)
+                seen.add(f.name)
+    for f in main_files:
+        if f.name not in seen:
+            ordered_mains.append(f)
+            seen.add(f.name)
+
+    # Group JSON metadata by capture date; each group is a chronological queue.
+    meta_entries = parse_memories_json(layout['json_file']) if layout['json_file'] else []
+    by_date = defaultdict(deque)
+    for m in sorted(meta_entries, key=lambda e: e['date']):
+        day = _date_prefix_from_name(m['date'])
+        if day:
+            by_date[day].append(m)
+
+    memories = []
+    unmatched = 0
+    for main_file in ordered_mains:
+        file_day = _date_prefix_from_name(main_file.name)
+        meta = by_date[file_day].popleft() if (file_day and by_date.get(file_day)) else {}
+        if not meta and meta_entries:
+            unmatched += 1
+
+        date = meta.get('date', 'Unknown')
+        if date == 'Unknown' and file_day:
+            date = f"{file_day} 00:00:00 UTC"
+
+        memories.append({
+            'main_file': main_file,
+            'overlay_file': find_overlay_for_main(main_file),
+            'date': date,
+            'media_type': meta.get('media_type') or _media_type_from_suffix(main_file.suffix),
+            'latitude': meta.get('latitude', 'Unknown'),
+            'longitude': meta.get('longitude', 'Unknown'),
+        })
+
+    if unmatched:
+        print(f"  Warning: {unmatched} media file(s) had no JSON entry for their date; "
+              f"used the filename date only (no GPS).")
+    leftover = sum(len(q) for q in by_date.values())
+    if leftover:
+        print(f"  Note: {leftover} JSON metadata entr(ies) had no matching media file.")
+    return memories
+
+
+def process_local_export(
+    input_path: str,
+    output_dir: str = 'processed_memories',
+    merge_overlays: bool = True,
+    use_timestamp_filenames: bool = False,
+    use_local_timezone: bool = False,
+    videos_only: bool = False,
+    pictures_only: bool = False,
+    overlays_only: bool = False,
+) -> bool:
+    """Process a new-format (bundled-media) Snapchat export.
+
+    No network access: pairs -main/-overlay files, merges overlays, embeds
+    EXIF/video metadata and timestamps from json/memories_history.json, and
+    writes results to output_dir. Originals in the export are never modified.
+
+    Returns True if the input was a new-format export (and was processed),
+    False if it did not look like one (so the caller can fall back).
+    """
+    layout = locate_export_layout(input_path)
+    if layout is None:
+        return False
+
+    print("Detected new Snapchat export format (media bundled locally).")
+    print(f"  Export root: {layout['root']}")
+    print(f"  Media dir:   {layout['media_dir']}")
+    print(f"  Metadata:    {layout['json_file'] or '(none - using filename dates)'}")
+    print("=" * 60)
+
+    memories = build_local_memories(layout)
+    if not memories:
+        print("No -main media files found in the export!")
+        return True
+
+    if use_local_timezone and not timezone_support:
+        print("⚠ Timezone support disabled (missing timezonefinder/pytz); using UTC")
+        use_local_timezone = False
+
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+
+    metadata_list = []
+    merged_count = copied_count = skipped_count = error_count = 0
+
+    for idx, mem in enumerate(memories, start=1):
+        main_file = mem['main_file']
+        overlay_file = mem['overlay_file']
+        media_type = mem['media_type']
+        is_video = main_file.suffix.lower() in VIDEO_SUFFIXES
+
+        # Apply media-type / overlay filters.
+        if (videos_only and not is_video) or (pictures_only and is_video) or \
+                (overlays_only and overlay_file is None):
+            skipped_count += 1
+            continue
+
+        # Output filename: timestamp-based, or the export's clean base (no -main).
+        if use_timestamp_filenames and mem['date'] != 'Unknown':
+            out_name = generate_filename(mem['date'], main_file.suffix, True, f"{idx:02d}")
+        else:
+            out_name = main_file.name.replace('-main', '')
+        out_file = output_path / out_name
+
+        # Log only the on-disk filename (which already carries the date) + overlay;
+        # the date/GPS/timestamp are recorded in metadata.json and embedded in the
+        # files. Avoid echoing parsed date/location to stdout.
+        print(f"\n[{idx}/{len(memories)}] {main_file.name}")
+        if overlay_file:
+            print(f"  Overlay: {overlay_file.name}")
+
+        entry = {
+            'number': idx,
+            'date': mem['date'],
+            'media_type': media_type,
+            'latitude': mem['latitude'],
+            'longitude': mem['longitude'],
+            'source_main': main_file.name,
+            'source_overlay': overlay_file.name if overlay_file else None,
+        }
+
+        try:
+            did_merge = False
+            if is_video:
+                if overlay_file and merge_overlays:
+                    if ffmpeg_available:
+                        print("  Merging video overlay (this may take a while)...")
+                        if merge_video_overlay(main_file, overlay_file, out_file):
+                            did_merge = True
+                        else:
+                            print("  Video merge failed; copying main file instead")
+                            shutil.copy2(main_file, out_file)
+                    else:
+                        print("  FFmpeg unavailable; copying main file (overlay kept separate)")
+                        shutil.copy2(main_file, out_file)
+                        shutil.copy2(overlay_file, output_path / overlay_file.name.replace('-main', ''))
+                else:
+                    shutil.copy2(main_file, out_file)
+                # Embed creation time + GPS into the video container.
+                update_video_metadata(out_file, mem['date'], mem['latitude'],
+                                      mem['longitude'], use_local_timezone)
+            else:
+                with open(main_file, 'rb') as f:
+                    image_data = f.read()
+                if overlay_file and merge_overlays:
+                    if Image is not None:
+                        with open(overlay_file, 'rb') as f:
+                            overlay_data = f.read()
+                        image_data = merge_image_overlay(image_data, overlay_data)
+                        did_merge = True
+                    else:
+                        print("  Pillow unavailable; copying main image without merge")
+                # Embed EXIF (GPS + timestamp) regardless of merge.
+                image_data = add_exif_metadata(image_data, mem['date'], mem['latitude'],
+                                               mem['longitude'], use_local_timezone)
+                with open(out_file, 'wb') as f:
+                    f.write(image_data)
+
+            # Preserve capture date as the file's modification time.
+            timestamp = parse_date_to_timestamp(mem['date'], use_local_timezone,
+                                                mem['latitude'], mem['longitude'])
+            if timestamp:
+                set_file_timestamp(out_file, timestamp)
+            else:
+                # Fall back to the original file's mtime.
+                src_stat = main_file.stat()
+                os.utime(out_file, (src_stat.st_atime, src_stat.st_mtime))
+
+            size = out_file.stat().st_size
+            print(f"  {'Merged' if did_merge else 'Saved'} ({size:,} bytes)")
+            entry['status'] = 'success'
+            entry['type'] = 'merged' if did_merge else 'single'
+            entry['files'] = [{'path': out_name, 'size': size,
+                               'type': 'merged' if did_merge else 'single'}]
+            if did_merge:
+                merged_count += 1
+            else:
+                copied_count += 1
+        except Exception as e:  # noqa: BLE001 - never let one bad file abort the batch
+            print(f"  ERROR: {e}")
+            entry['status'] = 'failed'
+            entry['error'] = str(e)
+            error_count += 1
+
+        metadata_list.append(entry)
+
+    save_metadata(metadata_list, output_path)
+
+    print("\n" + "=" * 60)
+    print("Local export processing complete!")
+    print(f"Summary: {merged_count} merged, {copied_count} copied, "
+          f"{skipped_count} skipped, {error_count} errors")
+    print(f"Output: {output_path}/  (originals in the export were not modified)")
+    return True
+
+
 def download_all_memories(
     html_path: str,
     output_dir: str = 'memories',
@@ -2404,6 +2787,17 @@ if __name__ == '__main__':
         metavar='FOLDER',
         help='Update timezone metadata for already-downloaded files (requires timezonefinder and pytz)'
     )
+    parser.add_argument(
+        '--local-export',
+        action='store_true',
+        help='Process a new-format Snapchat export whose media is bundled locally '
+             '(no download URLs). Auto-detected when an export folder is provided.'
+    )
+    parser.add_argument(
+        '--no-merge',
+        action='store_true',
+        help='In --local-export mode, keep -main/-overlay files separate instead of merging them'
+    )
 
     args = parser.parse_args()
 
@@ -2415,6 +2809,30 @@ if __name__ == '__main__':
     # Handle --update-timezone mode (separate from normal download mode)
     if args.update_timezone:
         update_existing_timezone_metadata(args.update_timezone)
+        sys.exit(0)
+
+    # Handle new export format (2026+): media bundled locally, no download URLs.
+    # Forced with --local-export, or auto-detected for a genuine new-format export
+    # (a folder with *-main.* media plus a memories.html gallery or JSON metadata).
+    export_layout = locate_export_layout(args.html_file)
+    is_new_export = export_layout is not None and (
+        export_layout['gallery_html'] is not None or export_layout['json_file'] is not None
+    )
+    if args.local_export or is_new_export:
+        if export_layout is None:
+            print(f"Error: '{args.html_file}' does not look like a new-format export "
+                  f"(no '*-main.*' media files found).")
+            sys.exit(1)
+        process_local_export(
+            args.html_file,
+            output_dir=(args.output if args.output != 'memories' else 'processed_memories'),
+            merge_overlays=not args.no_merge,
+            use_timestamp_filenames=args.timestamp_filenames,
+            use_local_timezone=args.local_timezone,
+            videos_only=args.videos_only,
+            pictures_only=args.pictures_only,
+            overlays_only=args.overlays_only,
+        )
         sys.exit(0)
 
     html_path = args.html_file

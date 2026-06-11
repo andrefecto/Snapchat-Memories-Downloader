@@ -579,6 +579,28 @@
       <label for="fileInput" class="btn">Choose HTML File</label>
       <p id="fileName" style="margin-top: 15px; color: #667eea; font-weight: 600"></p>
 
+      <!-- New bundled-media export (~2026): media already on disk, no download links -->
+      <div style="
+            margin-top: 25px;
+            padding: 16px;
+            border: 1px dashed #667eea;
+            border-radius: 8px;
+            background: #f6f7ff;
+          ">
+        <h4 style="margin-bottom: 6px; font-size: 16px">
+          📦 New Snapchat export? (media already included)
+        </h4>
+        <p style="color: #666; margin-bottom: 12px; font-size: 14px">
+          If your export has no "Download" links and the photos/videos are already
+          inside a <code>memories</code> folder, choose the unzipped export folder
+          instead. Overlays are merged in your browser and downloaded as a ZIP — your
+          files never leave your computer.
+        </p>
+        <input type="file" id="folderInput" webkitdirectory directory multiple />
+        <label for="folderInput" class="btn" style="background: #667eea">Choose Export Folder</label>
+        <p id="folderName" style="margin-top: 10px; color: #667eea; font-weight: 600"></p>
+      </div>
+
       <div style="
             margin-top: 25px;
             padding-top: 20px;
@@ -2406,6 +2428,15 @@
       }
     });
 
+    const folderInput = document.getElementById("folderInput");
+    if (folderInput) {
+      folderInput.addEventListener("change", (e) => {
+        if (e.target.files.length > 0) {
+          handleExportFolder(e.target.files);
+        }
+      });
+    }
+
     metadataInput.addEventListener("change", async (e) => {
       if (e.target.files.length > 0) {
         const file = e.target.files[0];
@@ -2652,6 +2683,357 @@
       startButton.style.display = "inline-block";
     }
 
+    // ====================================================================
+    // NEW EXPORT FORMAT (~2026): media bundled locally (GitHub issue #23)
+    // Folder-picker path: the user selects the unzipped export folder; we pair
+    // each -main file with its -overlay (filename convention), merge them, embed
+    // EXIF/metadata from json/memories_history.json, and download a ZIP. No
+    // network access. Mirrors process_local_export() in download_memories.py.
+    // ====================================================================
+    let localExportMode = false;
+    let localExportMemories = [];
+
+    function pathBasename(path) {
+      return (path || "").split("/").pop();
+    }
+
+    function isVideoName(name) {
+      return /\.(mp4|mov|avi|m4v)$/i.test(name || "");
+    }
+
+    function safeParseSnapchatDate(dateStr) {
+      if (!dateStr || dateStr === "Unknown") return null;
+      try {
+        const d = parseSnapchatDate(dateStr);
+        return isNaN(d.getTime()) ? null : d;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function datePrefixFromName(name) {
+      const m = (name || "").match(/^(\d{4}-\d{2}-\d{2})/);
+      return m ? m[1] : null;
+    }
+
+    /** Normalize json/memories_history.json text into memory metadata. */
+    function parseMemoriesJsonText(text) {
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        return [];
+      }
+      const entries =
+        data && Array.isArray(data["Saved Media"]) ? data["Saved Media"] : [];
+      return entries.map((entry) => {
+        const date = ((entry["Date"] || "Unknown") + "").trim() || "Unknown";
+        const mediaType =
+          ((entry["Media Type"] || "Unknown") + "").trim() || "Unknown";
+        let latitude = "Unknown";
+        let longitude = "Unknown";
+        const loc = entry["Location"] || "";
+        const m = loc.match(/Latitude,\s*Longitude:\s*([-\d.]+),\s*([-\d.]+)/);
+        if (m) {
+          latitude = m[1];
+          longitude = m[2];
+        }
+        return { date, mediaType, latitude, longitude };
+      });
+    }
+
+    /** Ordered list of -main filenames referenced by memories.html. */
+    function parseGalleryMainOrderText(text) {
+      const order = [];
+      const re = /src\s*=\s*"([^"]*?-main\.[^"]+)"/g;
+      let m;
+      while ((m = re.exec(text)) !== null) order.push(pathBasename(m[1]));
+      return order;
+    }
+
+    /** Ingest a chosen export folder and build localExportMemories[]. */
+    async function handleExportFolder(fileList) {
+      const files = Array.from(fileList || []);
+      if (files.length === 0) return;
+
+      const mainFiles = [];
+      const overlaysByBase = {};
+      let jsonFile = null;
+      let galleryFile = null;
+
+      for (const f of files) {
+        const path = f.webkitRelativePath || f.name;
+        const name = pathBasename(path);
+        if (name === "memories_history.json") jsonFile = f;
+        if (name === "memories.html" && path.includes("memories/"))
+          galleryFile = f;
+        const ov = name.match(/^(.*)-overlay\.[^.]+$/i);
+        if (ov) overlaysByBase[ov[1]] = f;
+        else if (/-main\.[^.]+$/i.test(name)) mainFiles.push(f);
+      }
+
+      if (mainFiles.length === 0) {
+        addLog(
+          "No '*-main.*' media files found in that folder. If your export has " +
+            "Download links instead, use the 'Choose HTML File' option above.",
+          "error"
+        );
+        document.getElementById("folderName").textContent =
+          "Not a bundled-media export (no -main files found).";
+        return;
+      }
+
+      // Order main files by the gallery when available, then append the rest.
+      const mainByName = {};
+      for (const f of mainFiles)
+        mainByName[pathBasename(f.webkitRelativePath || f.name)] = f;
+
+      const ordered = [];
+      const seen = new Set();
+      if (galleryFile) {
+        const galleryText = await galleryFile.text();
+        for (const nm of parseGalleryMainOrderText(galleryText)) {
+          const f = mainByName[nm];
+          if (f && !seen.has(nm)) {
+            ordered.push(f);
+            seen.add(nm);
+          }
+        }
+      }
+      for (const f of mainFiles) {
+        const nm = pathBasename(f.webkitRelativePath || f.name);
+        if (!seen.has(nm)) {
+          ordered.push(f);
+          seen.add(nm);
+        }
+      }
+
+      const meta = jsonFile ? parseMemoriesJsonText(await jsonFile.text()) : [];
+
+      // Match each file to a JSON entry that shares its capture DATE. The JSON has
+      // no filename field AND lists entries newest-first while the gallery/files are
+      // oldest-first, so positional alignment would mismatch everything. Grouping by
+      // date is direction-agnostic; within a date, entries are consumed in
+      // chronological order, lining up with the gallery's chronological order.
+      const byDate = {};
+      const sortedMeta = meta
+        .slice()
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      for (const m of sortedMeta) {
+        const day = datePrefixFromName(m.date);
+        if (!day) continue;
+        (byDate[day] = byDate[day] || []).push(m);
+      }
+
+      let unmatched = 0;
+      localExportMemories = ordered.map((mainFile) => {
+        const name = pathBasename(mainFile.webkitRelativePath || mainFile.name);
+        const base = name.slice(0, name.lastIndexOf("-main"));
+        const overlayFile = overlaysByBase[base] || null;
+
+        const fileDay = datePrefixFromName(name);
+        const queue = fileDay ? byDate[fileDay] : null;
+        const entry = queue && queue.length ? queue.shift() : {};
+        if (!entry.date && meta.length) unmatched++;
+
+        let date = entry.date || "Unknown";
+        if (date === "Unknown" && fileDay) date = `${fileDay} 00:00:00 UTC`;
+
+        return {
+          mainFile,
+          overlayFile,
+          date,
+          mediaType:
+            entry.mediaType || (isVideoName(name) ? "Video" : "Image"),
+          latitude: entry.latitude || "Unknown",
+          longitude: entry.longitude || "Unknown",
+        };
+      });
+      if (unmatched) {
+        addLog(
+          `Warning: ${unmatched} media file(s) had no JSON entry for their date; ` +
+            "using filename date only (no GPS).",
+          "warning"
+        );
+      }
+
+      localExportMode = true;
+      const withOverlay = localExportMemories.filter((m) => m.overlayFile).length;
+      addLog(
+        `Detected new export format: ${localExportMemories.length} memories ` +
+          `(${withOverlay} with overlays)${jsonFile ? "" : " — no JSON metadata found"}.`,
+        "success"
+      );
+      document.getElementById("folderName").textContent =
+        `${localExportMemories.length} memories ready (${withOverlay} with overlays). Click "Start" to merge & download.`;
+      startButton.style.display = "inline-block";
+    }
+
+    /** Process a chosen new-format export: merge, embed metadata, download ZIP. */
+    async function processLocalExport() {
+      const merge = document.getElementById("mergeOverlaysCheckbox").checked;
+      const overlaysOnly = document.getElementById("overlaysOnlyCheckbox").checked;
+      const videosOnly = document.getElementById("videosOnlyCheckbox").checked;
+      const picturesOnly = document.getElementById("picturesOnlyCheckbox").checked;
+      const useTimestamp = document.getElementById("timestampFilenamesCheckbox").checked;
+
+      const exportZip = new JSZip();
+      const metadataList = [];
+      const total = localExportMemories.length;
+      let merged = 0;
+      let copied = 0;
+      let skipped = 0;
+      let errors = 0;
+
+      addLog(`\nProcessing ${total} memories from local export...`, "info");
+
+      for (let i = 0; i < total; i++) {
+        if (shouldStop) {
+          addLog("⏸ Stopped — packaging what was processed so far.", "warning");
+          break;
+        }
+        const mem = localExportMemories[i];
+        const mainName = pathBasename(
+          mem.mainFile.webkitRelativePath || mem.mainFile.name
+        );
+        const ext = mainName.slice(mainName.lastIndexOf("."));
+        const isVideo = isVideoName(mainName);
+
+        if (
+          (videosOnly && !isVideo) ||
+          (picturesOnly && isVideo) ||
+          (overlaysOnly && !mem.overlayFile)
+        ) {
+          skipped++;
+          continue;
+        }
+
+        const outName =
+          useTimestamp && mem.date !== "Unknown"
+            ? generateFilename(mem.date, ext, true, String(i + 1).padStart(2, "0"))
+            : mainName.replace("-main", "");
+
+        status.textContent = `[${i + 1}/${total}] ${mainName}`;
+        addLog(`[${i + 1}/${total}] ${mainName}`, "info");
+
+        const entry = {
+          number: i + 1,
+          date: mem.date,
+          media_type: mem.mediaType,
+          latitude: mem.latitude,
+          longitude: mem.longitude,
+          source_main: mainName,
+          source_overlay: mem.overlayFile
+            ? pathBasename(mem.overlayFile.webkitRelativePath || mem.overlayFile.name)
+            : null,
+        };
+
+        try {
+          let outData = await mem.mainFile.arrayBuffer();
+          let didMerge = false;
+          const fileDate = safeParseSnapchatDate(mem.date);
+          const zipOpts = {};
+          if (fileDate) zipOpts.date = fileDate;
+
+          if (isVideo) {
+            if (mem.overlayFile && merge) {
+              const overlayName = pathBasename(
+                mem.overlayFile.webkitRelativePath || mem.overlayFile.name
+              );
+              const overlayExt = overlayName.slice(overlayName.lastIndexOf("."));
+              const overlayIsImage = !isVideoName(overlayName);
+              const overlayData = await mem.overlayFile.arrayBuffer();
+              addLog("  Merging video overlay (FFmpeg.wasm)...", "info");
+              const result = await mergeVideoOverlay(
+                outData,
+                overlayData,
+                null,
+                overlayIsImage,
+                overlayExt
+              );
+              if (result) {
+                outData = result;
+                didMerge = true;
+              } else {
+                addLog(
+                  "  Video merge unavailable; saving main + overlay separately.",
+                  "warning"
+                );
+                const ovOut = overlayName.replace("-main", "");
+                exportZip.file(ovOut, overlayData, {
+                  ...zipOpts,
+                  compression: "STORE",
+                });
+                entry.overlay_saved_separately = ovOut;
+              }
+            }
+            try {
+              outData = await addVideoMetadata(
+                outData,
+                mem.date,
+                mem.latitude,
+                mem.longitude
+              );
+            } catch (e) {
+              // Non-fatal: keep the video without container metadata.
+            }
+            // Videos are already compressed — STORE avoids breaking playback.
+            exportZip.file(outName, outData, { ...zipOpts, compression: "STORE" });
+          } else {
+            if (mem.overlayFile && merge) {
+              const overlayData = await mem.overlayFile.arrayBuffer();
+              outData = await mergeImageOverlay(outData, overlayData);
+              didMerge = true;
+            }
+            outData = await addExifMetadata(
+              outData,
+              mem.date,
+              mem.latitude,
+              mem.longitude
+            );
+            exportZip.file(outName, outData, zipOpts);
+          }
+
+          entry.status = "success";
+          entry.type = didMerge ? "merged" : "single";
+          entry.files = [{ path: outName, type: entry.type }];
+          if (didMerge) merged++;
+          else copied++;
+          addLog(`  ${didMerge ? "Merged" : "Saved"}: ${outName}`, "success");
+        } catch (error) {
+          errors++;
+          entry.status = "failed";
+          entry.error = error.message;
+          addLog(`  ERROR: ${error.message}`, "error");
+        }
+
+        metadataList.push(entry);
+        progressFill.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+      }
+
+      exportZip.file(
+        "metadata.json",
+        JSON.stringify(
+          { settings: { source: "local-export" }, memories: metadataList },
+          null,
+          2
+        )
+      );
+
+      status.textContent = "Creating ZIP...";
+      addLog("\n📦 Packaging snapchat-memories-merged.zip...", "info");
+      const blob = await exportZip.generateAsync({ type: "blob" });
+      downloadBlob(blob, "snapchat-memories-merged.zip");
+
+      addLog(
+        `\n✅ Done! ${merged} merged, ${copied} copied, ${skipped} skipped, ${errors} errors.`,
+        "success"
+      );
+      status.textContent = "Complete!";
+      stopButton.style.display = "none";
+      startButton.style.display = "inline-block";
+    }
+
     function handleStartDownload() {
       // Reset stop flag
       shouldStop = false;
@@ -2660,6 +3042,16 @@
       startButton.style.display = "none";
       stopButton.style.display = "inline-block";
       progressContainer.style.display = "block";
+
+      // New bundled-media export path (folder picker) vs. classic URL download.
+      if (localExportMode) {
+        processLocalExport().catch((err) => {
+          addLog(`Fatal error: ${err.message}`, "error");
+          stopButton.style.display = "none";
+          startButton.style.display = "inline-block";
+        });
+        return;
+      }
 
       // Start the download
       startDownload();
