@@ -1,0 +1,82 @@
+name: Bug report
+description: Something isn't working
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please **don't** attach real
+        Snapchat memories, download URLs, or GPS coordinates — redact or use
+        synthetic samples.
+  - type: dropdown
+    id: version
+    attributes:
+      label: Which version?
+      options:
+        - Web (browser, GitHub Pages)
+        - Python CLI (download_memories.py)
+        - Python GUI (snapchat_memories_gui.py)
+    validations:
+      required: true
+  - type: dropdown
+    id: export-format
+    attributes:
+      label: Which export format do you have?
+      description: |
+        Open your export. Does `memories_history.html` have **Download** links, or is
+        your media already inside a **`memories/`** folder (no links)?
+      options:
+        - "Older: memories_history.html has Download links"
+        - "Newer (~2026): media is bundled in a memories/ folder (no links)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including any error message.
+      placeholder: When I ... the tool ...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to ...
+        2. Click / run ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Windows 11, macOS 14, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Browser (web) or Python version (CLI/GUI)
+      placeholder: "e.g. Chrome 124 / Firefox 126 — or Python 3.12"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / console output
+      description: |
+        Web: open DevTools → Console and paste relevant output.
+        Python: paste the terminal output. **Remove any URLs or coordinates.**
+      render: shell
+    validations:
+      required: false

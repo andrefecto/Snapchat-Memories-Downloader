@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an idea or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What are you trying to do that's hard or impossible today?
+      placeholder: I'm always frustrated when ...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Which version is this for?
+      multiple: true
+      options:
+        - Web (browser)
+        - Python CLI
+        - Python GUI
+        - Either / both
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — mockups, links, examples (no personal data, please).
+    validations:
+      required: false
