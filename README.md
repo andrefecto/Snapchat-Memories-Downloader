@@ -39,6 +39,23 @@ but are now separate options at the bottom of the list.
 
 [More info on Reddit](https://www.reddit.com/r/techsupport/comments/18mkfvv/is_there_a_way_of_exporting_all_snapchat/)
 
+### Two export formats
+
+Snapchat ships Memories exports in one of two ways, and this tool handles both:
+
+- **Old format (download links):** the export's `html/memories_history.html` has a
+  **Download** link per memory and the actual media lives on Snapchat's servers.
+  The tool downloads each file (the original behavior).
+- **New format (media bundled in, ~2026):** the export already contains your media
+  on disk inside a `memories/` folder (files named `..._-main.<ext>` plus optional
+  `..._-overlay.<ext>`), and the download column reads `N/A`. Nothing needs to be
+  downloaded — but Snapchat still does **not** merge overlays onto your photos/videos.
+
+If your export is the new bundled format and you point the tool at the export folder,
+it **auto-detects** it and switches to local processing — pairing each `-main` file
+with its `-overlay`, merging them, and copying GPS/timestamps from
+`json/memories_history.json`. See [New bundled-media exports](#-new-bundled-media-exports).
+
 ## Why Use This FREE Tool?
 
 ### 💰 Don't Pay for What Should Be Free
@@ -198,6 +215,44 @@ python download_memories.py --retry-failed
 ```
 
 ### Advanced Features
+
+#### 📦 New bundled-media exports
+
+If your Snapchat export already contains your media on disk (the new ~2026 format —
+a `memories/` folder full of `..._-main.<ext>` files and a download column that reads
+`N/A`), just point the tool at the **export folder** and it auto-detects it:
+
+```bash
+# Auto-detected — no download links needed
+python download_memories.py /path/to/unzipped-export
+
+# Or force it explicitly
+python download_memories.py /path/to/unzipped-export --local-export
+```
+
+**What this does (no network access):**
+
+- ✅ Pairs each `-main` file with its matching `-overlay` (by filename)
+- ✅ Merges overlays onto the base photo/video (the part Snapchat still skips)
+- ✅ Reads date + GPS from `json/memories_history.json` and embeds EXIF / video metadata
+- ✅ Sets each file's modification time to the original capture date
+- ✅ Writes results to `processed_memories/` — **your export is never modified**
+
+**Useful options:**
+
+```bash
+# Keep -main/-overlay separate instead of merging
+python download_memories.py /path/to/export --no-merge
+
+# Local-timezone metadata, timestamp filenames, only items that have overlays
+python download_memories.py /path/to/export --local-timezone --timestamp-filenames --overlays-only
+
+# Custom output folder
+python download_memories.py /path/to/export -o ./my-merged-memories
+```
+
+> Video overlay merging requires FFmpeg (see [Setup](#setup)). Without it, videos are
+> copied and their `-overlay` kept alongside so you can merge later.
 
 #### 🌍 Timezone-Aware Metadata
 
