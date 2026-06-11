@@ -28,6 +28,11 @@ jobs:
       uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
+        # Cache the pip download/wheel cache so dependency installs (PyQt6,
+        # timezonefinder, etc.) don't rebuild/redownload every run. This is the
+        # other big Windows cost besides FFmpeg.
+        cache: 'pip'
+        cache-dependency-path: requirements.txt
 
     - name: Install dependencies
       run: |
