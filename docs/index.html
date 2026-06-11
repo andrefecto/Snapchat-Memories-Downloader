@@ -2809,46 +2809,53 @@
       }
 
       const meta = jsonFile ? parseMemoriesJsonText(await jsonFile.text()) : [];
-      const aligned = meta.length === ordered.length;
-      if (meta.length && !aligned) {
-        addLog(
-          `Warning: ${ordered.length} media files but ${meta.length} JSON entries; ` +
-            "cannot match GPS/time by order — using filename dates.",
-          "warning"
-        );
+
+      // Match each file to a JSON entry that shares its capture DATE. The JSON has
+      // no filename field AND lists entries newest-first while the gallery/files are
+      // oldest-first, so positional alignment would mismatch everything. Grouping by
+      // date is direction-agnostic; within a date, entries are consumed in
+      // chronological order, lining up with the gallery's chronological order.
+      const byDate = {};
+      const sortedMeta = meta
+        .slice()
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      for (const m of sortedMeta) {
+        const day = datePrefixFromName(m.date);
+        if (!day) continue;
+        (byDate[day] = byDate[day] || []).push(m);
       }
 
-      localExportMemories = ordered.map((mainFile, i) => {
+      let unmatched = 0;
+      localExportMemories = ordered.map((mainFile) => {
         const name = pathBasename(mainFile.webkitRelativePath || mainFile.name);
         const base = name.slice(0, name.lastIndexOf("-main"));
         const overlayFile = overlaysByBase[base] || null;
-        let entry = aligned && meta[i] ? meta[i] : {};
-        let date = entry.date || "Unknown";
 
-        // Cross-check the JSON date against the filename's date prefix.
-        const fileDate = datePrefixFromName(name);
-        if (entry.date && date !== "Unknown" && fileDate && !date.startsWith(fileDate)) {
-          addLog(
-            `Warning: date mismatch for ${name} (JSON '${date}' vs filename ` +
-              `'${fileDate}'); using filename date.`,
-            "warning"
-          );
-          entry = {};
-          date = "Unknown";
-        }
-        if (date === "Unknown" && fileDate) date = `${fileDate} 00:00:00 UTC`;
+        const fileDay = datePrefixFromName(name);
+        const queue = fileDay ? byDate[fileDay] : null;
+        const entry = queue && queue.length ? queue.shift() : {};
+        if (!entry.date && meta.length) unmatched++;
+
+        let date = entry.date || "Unknown";
+        if (date === "Unknown" && fileDay) date = `${fileDay} 00:00:00 UTC`;
 
         return {
           mainFile,
           overlayFile,
           date,
           mediaType:
-            entry.mediaType ||
-            (isVideoName(name) ? "Video" : "Image"),
+            entry.mediaType || (isVideoName(name) ? "Video" : "Image"),
           latitude: entry.latitude || "Unknown",
           longitude: entry.longitude || "Unknown",
         };
       });
+      if (unmatched) {
+        addLog(
+          `Warning: ${unmatched} media file(s) had no JSON entry for their date; ` +
+            "using filename date only (no GPS).",
+          "warning"
+        );
+      }
 
       localExportMode = true;
       const withOverlay = localExportMemories.filter((m) => m.overlayFile).length;

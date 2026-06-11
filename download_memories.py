@@ -33,6 +33,7 @@ import io
 import subprocess
 import hashlib
 import shutil
+from collections import defaultdict, deque
 
 INVALID_FILENAME_CHARS = '<>:"/\\|?*'
 
@@ -2059,10 +2060,15 @@ def build_local_memories(layout: dict) -> list:
     """Build the ordered list of memories to process from a new-format export.
 
     Each item: {main_file, overlay_file, date, media_type, latitude, longitude}.
-    Files are ordered by the gallery (memories.html) when available, then aligned
-    by index with the JSON metadata. When counts disagree the date prefix in each
-    filename is used as a fallback so timestamps stay correct even if GPS can't be
-    matched.
+
+    Files are ordered by the gallery (memories.html, chronological) when available,
+    else by filename. Each file is matched to a JSON metadata entry that shares its
+    capture DATE (the JSON has no filename field, and - importantly - its entries are
+    ordered newest-first while the gallery/files are oldest-first, so positional
+    alignment would mismatch everything). Matching by date is direction-agnostic:
+    within a date, entries are consumed in chronological order, which lines up with
+    the gallery's chronological order. Files with no matching JSON entry fall back to
+    the filename's date (no GPS), so timestamps stay correct regardless.
     """
     media_dir = layout['media_dir']
     main_files = sorted(media_dir.glob('*-main.*'))
@@ -2082,28 +2088,25 @@ def build_local_memories(layout: dict) -> list:
             ordered_mains.append(f)
             seen.add(f.name)
 
+    # Group JSON metadata by capture date; each group is a chronological queue.
     meta_entries = parse_memories_json(layout['json_file']) if layout['json_file'] else []
-    aligned = len(meta_entries) == len(ordered_mains)
-    if meta_entries and not aligned:
-        print(f"  Warning: {len(ordered_mains)} media files but {len(meta_entries)} JSON "
-              f"entries - cannot reliably match GPS/time by order; using filename dates.")
+    by_date = defaultdict(deque)
+    for m in sorted(meta_entries, key=lambda e: e['date']):
+        day = _date_prefix_from_name(m['date'])
+        if day:
+            by_date[day].append(m)
 
     memories = []
-    for idx, main_file in enumerate(ordered_mains):
-        meta = meta_entries[idx] if (aligned and idx < len(meta_entries)) else {}
+    unmatched = 0
+    for main_file in ordered_mains:
+        file_day = _date_prefix_from_name(main_file.name)
+        meta = by_date[file_day].popleft() if (file_day and by_date.get(file_day)) else {}
+        if not meta and meta_entries:
+            unmatched += 1
+
         date = meta.get('date', 'Unknown')
-
-        # Cross-check the indexed JSON date against the filename's date prefix.
-        # On mismatch, trust the filename (avoids attaching the wrong GPS/time).
-        file_date = _date_prefix_from_name(main_file.name)
-        if meta and date != 'Unknown' and file_date and not date.startswith(file_date):
-            print(f"  Warning: date mismatch for {main_file.name} "
-                  f"(JSON '{date}' vs filename '{file_date}'); using filename date.")
-            meta = {}
-            date = 'Unknown'
-
-        if date == 'Unknown' and file_date:
-            date = f"{file_date} 00:00:00 UTC"
+        if date == 'Unknown' and file_day:
+            date = f"{file_day} 00:00:00 UTC"
 
         memories.append({
             'main_file': main_file,
@@ -2113,6 +2116,13 @@ def build_local_memories(layout: dict) -> list:
             'latitude': meta.get('latitude', 'Unknown'),
             'longitude': meta.get('longitude', 'Unknown'),
         })
+
+    if unmatched:
+        print(f"  Warning: {unmatched} media file(s) had no JSON entry for their date; "
+              f"used the filename date only (no GPS).")
+    leftover = sum(len(q) for q in by_date.values())
+    if leftover:
+        print(f"  Note: {leftover} JSON metadata entr(ies) had no matching media file.")
     return memories
 
 
