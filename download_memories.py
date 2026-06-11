@@ -2189,9 +2189,10 @@ def process_local_export(
             out_name = main_file.name.replace('-main', '')
         out_file = output_path / out_name
 
-        has_gps = mem['latitude'] != 'Unknown' and mem['longitude'] != 'Unknown'
+        # Log only the on-disk filename (which already carries the date) + overlay;
+        # the date/GPS/timestamp are recorded in metadata.json and embedded in the
+        # files. Avoid echoing parsed date/location to stdout.
         print(f"\n[{idx}/{len(memories)}] {main_file.name}")
-        print(f"  Date: {mem['date']} | Type: {media_type} | GPS: {'yes' if has_gps else 'no'}")
         if overlay_file:
             print(f"  Overlay: {overlay_file.name}")
 
@@ -2253,7 +2254,7 @@ def process_local_export(
                 os.utime(out_file, (src_stat.st_atime, src_stat.st_mtime))
 
             size = out_file.stat().st_size
-            print(f"  {'Merged' if did_merge else 'Saved'}: {out_name} ({size:,} bytes)")
+            print(f"  {'Merged' if did_merge else 'Saved'} ({size:,} bytes)")
             entry['status'] = 'success'
             entry['type'] = 'merged' if did_merge else 'single'
             entry['files'] = [{'path': out_name, 'size': size,
