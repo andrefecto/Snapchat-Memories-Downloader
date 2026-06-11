@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Search existing issues first
+    url: https://github.com/andrefecto/Snapchat-Memories-Downloader/issues?q=is%3Aissue
+    about: Your question may already be answered — please search before opening a new issue.
+  - name: README & usage guide
+    url: https://github.com/andrefecto/Snapchat-Memories-Downloader#readme
+    about: Setup, options, and how to get your Snapchat data.
