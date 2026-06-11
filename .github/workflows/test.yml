@@ -14,6 +14,9 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cancel the whole matrix when one job fails - we want to see every
+      # OS/Python result, not just the first failure.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ['3.11', '3.12']
@@ -32,9 +35,22 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-cov pytest-xdist
 
-    # Cross-platform FFmpeg install with caching. Much faster than
-    # `choco install ffmpeg` on Windows (the previous bottleneck, ~2-3 min).
-    - name: Install FFmpeg
+    # Linux/macOS: the OS package manager is fast and ships a build that passes
+    # the video-merge tests. Windows: `choco install ffmpeg` is the slow step
+    # (~2-3 min), so use the cached setup-ffmpeg action there instead.
+    - name: Install FFmpeg (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Install FFmpeg (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install ffmpeg
+
+    - name: Install FFmpeg (Windows)
+      if: runner.os == 'Windows'
       uses: federicocarboni/setup-ffmpeg@v3
 
     - name: Run test suite
