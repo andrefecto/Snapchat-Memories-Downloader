@@ -2189,9 +2189,9 @@ def process_local_export(
             out_name = main_file.name.replace('-main', '')
         out_file = output_path / out_name
 
+        has_gps = mem['latitude'] != 'Unknown' and mem['longitude'] != 'Unknown'
         print(f"\n[{idx}/{len(memories)}] {main_file.name}")
-        print(f"  Date: {mem['date']} | Type: {media_type} | "
-              f"Location: {mem['latitude']}, {mem['longitude']}")
+        print(f"  Date: {mem['date']} | Type: {media_type} | GPS: {'yes' if has_gps else 'no'}")
         if overlay_file:
             print(f"  Overlay: {overlay_file.name}")
 
