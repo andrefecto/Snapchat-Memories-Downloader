@@ -1107,8 +1107,9 @@ class TestProcessLocalExport:
             # Merged output written without the -main suffix
             produced = out / '2026-05-13_A.png'
             assert produced.exists()
-            img = Image.open(produced)
-            assert img.size == (64, 64)
+            # Context manager closes the handle (Windows can't clean up an open file).
+            with Image.open(produced) as img:
+                assert img.size == (64, 64)
 
             # Originals untouched
             assert (root / 'memories' / '2026-05-13_A-main.png').exists()
