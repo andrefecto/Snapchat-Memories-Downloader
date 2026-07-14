@@ -23,9 +23,10 @@ import json
 import os
 import sys
 import argparse
+import bisect
 from pathlib import Path
 from html.parser import HTMLParser
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import zipfile
@@ -1935,6 +1936,30 @@ def _date_prefix_from_name(name: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+# Timestamp-join tolerance. A correct extraction of the export preserves each
+# file's mtime as its capture time, which equals the JSON "Date" (UTC wall-clock)
+# within the ZIP's 2-second (DOS) resolution.
+LOCAL_JOIN_TOLERANCE = timedelta(seconds=2)
+
+
+def _parse_memory_datetime(date_str: str) -> Optional[datetime]:
+    """Parse a memories_history 'Date' (e.g. '2016-07-09 20:48:02 UTC').
+
+    Returns a naive datetime holding the UTC wall-clock, or None. It is compared
+    against each file's local mtime, which a correct extraction sets to the same
+    wall-clock value (DOS zip timestamps are tz-naive wall-clock).
+    """
+    if not date_str or date_str == 'Unknown':
+        return None
+    s = date_str.strip()
+    if s.endswith('UTC'):
+        s = s[:-3].strip()
+    try:
+        return datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return None
+
+
 def locate_export_layout(input_path: str) -> Optional[dict]:
     """Locate the pieces of a new-format (bundled-media) Snapchat export.
 
@@ -2088,22 +2113,78 @@ def build_local_memories(layout: dict) -> list:
             ordered_mains.append(f)
             seen.add(f.name)
 
-    # Group JSON metadata by capture date; each group is a chronological queue.
+    # Match each media file to its JSON entry.
+    #
+    # Primary key: the file's capture timestamp. A correct extraction preserves
+    # each file's mtime as its capture time, which equals the UTC wall-clock in
+    # the JSON "Date" field (verified across a full export part: 100% of files
+    # fall within 2s of a JSON entry). Matching on the timestamp instead of by
+    # date-bucket ordering fixes GPS mis-assignment on days with multiple
+    # memories, where the gallery order does not track the JSON's chronological
+    # order within the day.
+    #
+    # Fallback (per file): if no unused JSON entry lies within the timestamp
+    # tolerance (e.g. the archive was extracted without preserving mtimes), we
+    # revert to the original date-grouped chronological queue, so behavior is
+    # never worse than the previous approach.
     meta_entries = parse_memories_json(layout['json_file']) if layout['json_file'] else []
-    by_date = defaultdict(deque)
+
+    records = []                    # each: {'m': entry, 'dt': datetime|None, 'used': False}
+    by_date = defaultdict(deque)    # fallback: YYYY-MM-DD -> chronological queue of records
     for m in sorted(meta_entries, key=lambda e: e['date']):
+        rec = {'m': m, 'dt': _parse_memory_datetime(m['date']), 'used': False}
+        records.append(rec)
         day = _date_prefix_from_name(m['date'])
         if day:
-            by_date[day].append(m)
+            by_date[day].append(rec)
+    dated = sorted((r for r in records if r['dt'] is not None), key=lambda r: r['dt'])
+    dated_times = [r['dt'] for r in dated]
+
+    def _match_by_timestamp(main_file):
+        try:
+            mt = datetime.fromtimestamp(main_file.stat().st_mtime)
+        except OSError:
+            return None
+        lo = bisect.bisect_left(dated_times, mt - LOCAL_JOIN_TOLERANCE)
+        hi = bisect.bisect_right(dated_times, mt + LOCAL_JOIN_TOLERANCE)
+        want = _media_type_from_suffix(main_file.suffix)
+        best = None
+        best_rank = None
+        for r in dated[lo:hi]:
+            if r['used']:
+                continue
+            delta = abs((r['dt'] - mt).total_seconds())
+            # Prefer a matching media type first, then the nearest timestamp.
+            rank = (0 if r['m'].get('media_type') == want else 1, delta)
+            if best_rank is None or rank < best_rank:
+                best, best_rank = r, rank
+        return best
 
     memories = []
-    unmatched = 0
+    ts_matched = fb_matched = unmatched = 0
     for main_file in ordered_mains:
-        file_day = _date_prefix_from_name(main_file.name)
-        meta = by_date[file_day].popleft() if (file_day and by_date.get(file_day)) else {}
-        if not meta and meta_entries:
+        rec = _match_by_timestamp(main_file)
+        if rec is not None:
+            ts_matched += 1
+        else:
+            # Fallback: next unused JSON entry sharing the file's date.
+            file_day = _date_prefix_from_name(main_file.name)
+            queue = by_date.get(file_day)
+            while queue:
+                cand = queue.popleft()
+                if not cand['used']:
+                    rec = cand
+                    fb_matched += 1
+                    break
+
+        meta = {}
+        if rec is not None:
+            rec['used'] = True
+            meta = rec['m']
+        elif meta_entries:
             unmatched += 1
 
+        file_day = _date_prefix_from_name(main_file.name)
         date = meta.get('date', 'Unknown')
         if date == 'Unknown' and file_day:
             date = f"{file_day} 00:00:00 UTC"
@@ -2117,10 +2198,13 @@ def build_local_memories(layout: dict) -> list:
             'longitude': meta.get('longitude', 'Unknown'),
         })
 
+    if fb_matched:
+        print(f"  Note: {fb_matched} file(s) matched by date fallback "
+              f"(mtimes not preserved on extraction?).")
     if unmatched:
-        print(f"  Warning: {unmatched} media file(s) had no JSON entry for their date; "
+        print(f"  Warning: {unmatched} media file(s) had no JSON entry; "
               f"used the filename date only (no GPS).")
-    leftover = sum(len(q) for q in by_date.values())
+    leftover = sum(1 for r in records if not r['used'])
     if leftover:
         print(f"  Note: {leftover} JSON metadata entr(ies) had no matching media file.")
     return memories
