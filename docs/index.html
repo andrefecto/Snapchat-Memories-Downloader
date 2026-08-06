@@ -550,7 +550,7 @@
         <li>
           Now, sit back and let the tool do the work for you!
           <ul style="list-style: none; padding-left: 15px; margin: 5px 0">
-            <li>If the process fails or is interrupted, upload the most recent <code>metadata.json</code> file (included in each ZIP) to resume.</li>
+            <li>If the process fails or is interrupted, upload the most recent <code>metadata.json</code> file (included in each ZIP) to resume. This applies to the <code>memories_history.html</code> workflow above; folder exports resume from the <code>metadata.json</code> in their own output folder instead, and only when "Save directly to a folder" is enabled.</li>
           </ul>
         </li>
         <li>
@@ -593,8 +593,10 @@
         <p style="color: #666; margin-bottom: 12px; font-size: 14px">
           If your export has no "Download" links and the photos/videos are already
           inside a <code>memories</code> folder, choose the unzipped export folder
-          instead. Overlays are merged in your browser and downloaded as a ZIP — your
-          files never leave your computer.
+          instead. Overlays are merged in your browser and saved either as one or more
+          ZIPs, or written straight into a folder you pick (see
+          <em>Save directly to a folder</em> under Advanced Options) — your files never
+          leave your computer.
         </p>
         <input type="file" id="folderInput" webkitdirectory directory multiple />
         <label for="folderInput" class="btn" style="background: #667eea">Choose Export Folder</label>
@@ -648,7 +650,10 @@
             <option value="20">20 files per batch</option>
           </select>
           <p class="option-description" style="margin-left: 0;">
-            Split downloads into multiple ZIPs for better browser performance
+            Split downloads into multiple ZIPs for better browser performance. Applies to
+            both export types. Folder exports also start a new ZIP whenever one reaches
+            ~512 MB, so very large videos can produce more ZIPs than the count here.
+            Ignored when "Save directly to a folder" is enabled.
           </p>
         </div>
       </div>
@@ -693,7 +698,24 @@
               <span>Process video overlays at end</span>
             </label>
             <p class="option-description">
-              Keep all files in the same batch - process video overlays after downloading everything (recommended)
+              Keep all files in the same batch - process video overlays after downloading everything (recommended).
+              Applies to link-based exports only; folder exports always merge as they go.
+            </p>
+          </div>
+
+          <div class="option-item" id="writeToFolderOption" style="display: none">
+            <label class="option-label">
+              <input type="checkbox" id="writeToFolderCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
+              <span>Save directly to a folder (no ZIPs)</span>
+            </label>
+            <p class="option-description">
+              Folder exports only, Chrome/Edge only. Writes one file at a time into a folder you
+              choose, so memory stays flat and there is nothing to extract — the only option that
+              works for very large exports. Creates and overwrites files in a
+              <code>snapchat-memories-merged</code> subfolder of the folder you pick, and can
+              resume where it left off. Trade-off: browsers cannot set file modification times
+              this way, so files get today's date in your file explorer (capture dates are still
+              written into each file's EXIF/video metadata and into metadata.json).
             </p>
           </div>
 
@@ -702,7 +724,7 @@
               <input type="checkbox" id="timestampFilenamesCheckbox" style="width: 18px; height: 18px; cursor: pointer" />
               <span>Timestamp-based filenames</span>
             </label>
-            <p class="option-description">Name files as YYYY.MM.DD-HH:MM:SS.ext instead of sequential numbers</p>
+            <p class="option-description">Name files as YYYY.MM.DD-HH.MM.SS.ext instead of sequential numbers</p>
           </div>
 
           <div class="option-item" style="margin-top: 20px;">
@@ -953,6 +975,13 @@
         <p style="margin-bottom: 15px;">
           Use <strong>"Process video overlays at end"</strong> to get fewer ZIP files overall.
         </p>
+        <p style="margin-bottom: 15px;">
+          <strong>Folder exports</strong> (new-style exports with the media already included) work
+          differently: they start a new ZIP after the chosen batch size <em>or</em> once the current
+          ZIP reaches ~512 MB, whichever comes first, and always merge video overlays as they go.
+          Enable <strong>"Save directly to a folder"</strong> to skip ZIPs entirely — that is the
+          only mode with no size ceiling at all.
+        </p>
 
         <h3 style="margin-top: 30px; margin-bottom: 10px; color: #667eea; font-size: 1.1em;">
           How do I report issues or bugs?
@@ -978,6 +1007,10 @@
         </ol>
         <p style="margin-bottom: 15px;">
           <strong>7-Zip Tip:</strong> Select all ZIPs → Right-click → 7-Zip → "Extract Here" to batch extract.
+        </p>
+        <p style="margin-bottom: 15px;">
+          Folder exports using <strong>"Save directly to a folder"</strong> produce no ZIPs, so there
+          is nothing to extract.
         </p>
       </div>
     </div>
@@ -2437,6 +2470,28 @@
       });
     }
 
+    /**
+     * Whether direct-to-disk writing is possible. The File System Access API is
+     * Chromium-desktop-only, needs a secure context, and is blocked in iframes.
+     */
+    function canWriteToFolder() {
+      return (
+        typeof window.showDirectoryPicker === "function" &&
+        window.isSecureContext &&
+        window.top === window
+      );
+    }
+
+    const writeToFolderCheckbox = document.getElementById("writeToFolderCheckbox");
+    if (writeToFolderCheckbox) {
+      // Batch size only governs ZIP output, which this mode doesn't produce.
+      writeToFolderCheckbox.addEventListener("change", () => {
+        const batchSelect = document.getElementById("batchSizeSelect");
+        batchSelect.disabled = writeToFolderCheckbox.checked;
+        batchSelect.style.opacity = writeToFolderCheckbox.checked ? "0.5" : "1";
+      });
+    }
+
     metadataInput.addEventListener("change", async (e) => {
       if (e.target.files.length > 0) {
         const file = e.target.files[0];
@@ -2716,6 +2771,77 @@
       return m ? m[1] : null;
     }
 
+    // Start a new ZIP once the current one reaches this many bytes of input data.
+    // JSZip holds the added buffers AND the generated output live at the same time,
+    // so the real peak is roughly 1.5-2x this number - comfortably under the ~2GB
+    // ceiling V8 puts on a single ArrayBuffer allocation.
+    const LOCAL_EXPORT_MAX_ZIP_BYTES = 512 * 1024 * 1024;
+
+    // Subfolder created inside the user-chosen output directory, so we never write
+    // alongside (or on top of) the files in their Snapchat export.
+    const LOCAL_EXPORT_OUTPUT_DIR = "snapchat-memories-merged";
+
+    /** Strip the "-main" suffix that sits immediately before the extension. */
+    function stripMainSuffix(name) {
+      return (name || "").replace(/-main(?=\.[^.]+$)/i, "");
+    }
+
+    // Names that Windows refuses regardless of extension.
+    const RESERVED_DOS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+    /**
+     * Make a Snapchat-derived name safe to hand to getFileHandle() and to write on
+     * any OS. getFileHandle() throws TypeError on "", ".", ".." and on any name
+     * containing a slash, which would otherwise surface as a random-looking failure.
+     * @param {string} name - Candidate output filename
+     * @param {number} index - Loop index, used to build a fallback name
+     * @param {string} ext - Extension to use for the fallback name
+     * @returns {string} A safe filename
+     */
+    function sanitizeOutputName(name, index, ext) {
+      let safe = (name || "")
+        .split(/[/\\]/)
+        .pop()
+        .replace(/[<>:"|?*\x00-\x1f]/g, "_")
+        .replace(/[. ]+$/, "");
+
+      // Keep the extension intact while capping the stem length.
+      if (safe.length > 200) {
+        const dot = safe.lastIndexOf(".");
+        const tail = dot > 0 ? safe.slice(dot) : "";
+        safe = safe.slice(0, 200 - tail.length) + tail;
+      }
+
+      const stem = safe.replace(/\.[^.]*$/, "");
+      if (!safe || safe === "." || safe === ".." || RESERVED_DOS_NAMES.test(stem)) {
+        return `memory-${index + 1}${ext || ""}`;
+      }
+      return safe;
+    }
+
+    /**
+     * Reserve a unique output name. Snapchat exports can legitimately produce
+     * duplicate names - most often in timestamp mode, where every media file whose
+     * day is missing from memories_history.json inherits the same "00:00:00" time.
+     * Without this, JSZip silently overwrites the earlier entry and the memory is
+     * lost. The suffix comes from the loop index rather than a running count so the
+     * same folder always yields the same names, whichever filters are enabled.
+     * @param {Set<string>} reserved - Names already used this run
+     * @param {string} name - Desired name (already sanitized)
+     * @param {number} index - Loop index
+     * @returns {string} A name not yet present in `reserved`
+     */
+    function reserveOutputName(reserved, name, index) {
+      let candidate = name;
+      if (reserved.has(candidate)) {
+        candidate = /\.[^.]+$/.test(name)
+          ? name.replace(/(\.[^.]+)$/, `_${index + 1}$1`)
+          : `${name}_${index + 1}`;
+      }
+      reserved.add(candidate);
+      return candidate;
+    }
+
     /** Normalize json/memories_history.json text into memory metadata. */
     function parseMemoriesJsonText(text) {
       let data;
@@ -2858,6 +2984,22 @@
       }
 
       localExportMode = true;
+
+      // Reveal the direct-to-disk option, which only applies to this path.
+      const writeToFolderOption = document.getElementById("writeToFolderOption");
+      if (writeToFolderOption && canWriteToFolder()) {
+        writeToFolderOption.style.display = "";
+      }
+      // Deferral exists to stop merged videos accumulating in a growing ZIP and to
+      // keep FFmpeg from blocking network downloads. Neither applies here: there is
+      // no network, and FFmpeg's peak per video is the same whenever it runs. Leaving
+      // the box visibly checked but inert would just mislead.
+      const deferCheckbox = document.getElementById("deferVideoOverlaysCheckbox");
+      if (deferCheckbox) {
+        deferCheckbox.disabled = true;
+        deferCheckbox.closest(".option-item").style.opacity = "0.5";
+      }
+
       const withOverlay = localExportMemories.filter((m) => m.overlayFile).length;
       addLog(
         `Detected new export format: ${localExportMemories.length} memories ` +
@@ -2869,27 +3011,360 @@
       startButton.style.display = "inline-block";
     }
 
-    /** Process a chosen new-format export: merge, embed metadata, download ZIP. */
-    async function processLocalExport() {
+    /** Serialize the running metadata list the same way both sinks want it. */
+    function localExportMetadataJson(metadataList) {
+      return JSON.stringify(
+        {
+          settings: { ...captureCurrentSettings(), source: "local-export" },
+          memories: metadataList,
+        },
+        null,
+        2
+      );
+    }
+
+    /**
+     * Batched-ZIP output sink (the default).
+     *
+     * The whole reason this exists: the previous implementation accumulated every
+     * file of the export into one JSZip and asked for a single Blob at the end,
+     * which fails with "Array buffer allocation failed" once the total passes the
+     * ~2GB limit V8 puts on one ArrayBuffer. Multi-gigabyte exports are the norm,
+     * so instead we flush a ZIP whenever the current one reaches the chosen batch
+     * size, reaches LOCAL_EXPORT_MAX_ZIP_BYTES, or has just absorbed a freshly
+     * merged video (the single largest thing we ever hold).
+     *
+     * @param {number} batchSize - Items per ZIP; 0 means "one ZIP" (still byte-capped)
+     */
+    function createLocalExportZipSink(batchSize) {
+      let zipObj = new JSZip();
+      let itemsInZip = 0;
+      let bytesInZip = 0;
+      let batchNum = batchSize > 0 ? 1 : 0;
+      let emitted = 0;
+
+      const sink = {
+        mode: "zip",
+
+        /** @returns {Promise<boolean>} always false - a ZIP can't be inspected */
+        async isAlreadyDone() {
+          return false;
+        },
+
+        async addFile(name, data, opts = {}) {
+          const zipOpts = {};
+          if (opts.date) zipOpts.date = opts.date;
+          // Videos are already compressed - STORE avoids breaking playback.
+          if (opts.store) zipOpts.compression = "STORE";
+          zipObj.file(name, data, zipOpts);
+          bytesInZip += data.byteLength || 0;
+        },
+
+        async flush(metadataList, reason) {
+          if (itemsInZip === 0) return;
+
+          zipObj.file("metadata.json", localExportMetadataJson(metadataList));
+          // "All in one ZIP" can still split - a merged video or the byte cap forces a
+          // flush - so number the parts rather than emitting the same filename twice.
+          const filename =
+            batchNum > 0
+              ? `snapchat-memories-merged-batch-${batchNum}.zip`
+              : emitted === 0
+                ? "snapchat-memories-merged.zip"
+                : `snapchat-memories-merged-part-${emitted + 1}.zip`;
+
+          status.textContent = `Creating ${filename}...`;
+          addLog(`\n📦 Packaging ${filename} (${reason})...`, "info");
+
+          let zipBlob;
+          try {
+            zipBlob = await zipObj.generateAsync({ type: "blob" });
+          } catch (error) {
+            if (error instanceof RangeError || error.message?.includes("allocation")) {
+              addLog(`❌ ERROR: Out of memory creating ${filename}`, "error");
+              addLog(`  Browser ran out of memory packaging this batch`, "error");
+              addLog(`  💡 SOLUTION: Reduce batch size in settings (try 10 or 20 items)`, "warning");
+              addLog(`  💡 Or enable "Save directly to a folder" in Advanced Options — it has no size limit`, "warning");
+              throw new Error(
+                `Memory allocation failed: ${error.message}. Try reducing batch size.`
+              );
+            }
+            throw error;
+          }
+
+          downloadBlob(zipBlob, filename);
+          addLog(`  ✓ Downloaded: ${filename} (${formatBytes(zipBlob.size)})`, "success");
+
+          // Drop every reference to the finished archive before the next one starts.
+          zipBlob = null;
+          zipObj = new JSZip();
+          itemsInZip = 0;
+          bytesInZip = 0;
+          emitted++;
+          if (batchNum > 0) batchNum++;
+
+          addLog("  Pausing 2s for garbage collection...", "info");
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          checkMemoryUsage();
+        },
+
+        async itemComplete(metadataList, { videoMerged } = {}) {
+          itemsInZip++;
+          const hitCount = batchSize > 0 && itemsInZip >= batchSize;
+          const hitBytes = bytesInZip >= LOCAL_EXPORT_MAX_ZIP_BYTES;
+          if (!hitCount && !hitBytes && !videoMerged) return;
+
+          const reason = videoMerged
+            ? "merged video - flushing immediately"
+            : hitBytes
+              ? `${formatBytes(bytesInZip)} buffered`
+              : `${itemsInZip} items`;
+          await sink.flush(metadataList, reason);
+        },
+
+        async finish(metadataList) {
+          await sink.flush(metadataList, "final batch");
+        },
+      };
+      return sink;
+    }
+
+    /**
+     * Direct-to-disk output sink (opt-in, Chrome/Edge only).
+     *
+     * Writes one file at a time straight into the chosen folder, so nothing ever
+     * accumulates and there is no size ceiling at all. The cost is that the File
+     * System Access API cannot set file modification times, which is why the ZIP
+     * sink above remains the default.
+     *
+     * @param {FileSystemDirectoryHandle} outDir - Destination subfolder
+     */
+    function createLocalExportFolderSink(outDir) {
+      let sinceMetadataWrite = 0;
+      let sinceMemoryCheck = 0;
+
+      async function writeMetadata(metadataList) {
+        // No keepExistingData: we want each rewrite to truncate the old file.
+        const handle = await outDir.getFileHandle("metadata.json", { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(localExportMetadataJson(metadataList));
+        await writable.close();
+        sinceMetadataWrite = 0;
+      }
+
+      const sink = {
+        mode: "folder",
+
+        async isAlreadyDone(name) {
+          try {
+            await outDir.getFileHandle(name);
+            return true;
+          } catch (error) {
+            if (error && error.name === "NotFoundError") return false;
+            throw error;
+          }
+        },
+
+        async addFile(name, data) {
+          const handle = await outDir.getFileHandle(name, { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(data);
+          await writable.close();
+        },
+
+        async itemComplete(metadataList) {
+          // Rewrite metadata often enough that a crash costs at most 25 items of
+          // resume information, without rewriting it on every single file.
+          if (++sinceMetadataWrite >= 25) await writeMetadata(metadataList);
+          // No GC pause here: nothing accumulates between items.
+          if (++sinceMemoryCheck >= 25) {
+            sinceMemoryCheck = 0;
+            checkMemoryUsage();
+          }
+        },
+
+        async finish(metadataList) {
+          await writeMetadata(metadataList);
+          addLog(
+            `  ✓ Wrote files and metadata.json into "${LOCAL_EXPORT_OUTPUT_DIR}"`,
+            "success"
+          );
+        },
+      };
+      return sink;
+    }
+
+    /**
+     * Read a previous run's metadata.json out of the output folder so we can skip
+     * work already done. Resume is only safe when the settings that determine a
+     * file's *contents* or *name* are unchanged: "merge overlays" changes contents
+     * without changing the name, so a bare file-exists check would permanently skip
+     * the merged version of anything written unmerged by an earlier run.
+     * @returns {Promise<Map<string, object>|null>} source_main -> prior entry, or null
+     */
+    async function loadLocalExportResumeState(outDir, merge, useTimestamp) {
+      let text;
+      try {
+        const handle = await outDir.getFileHandle("metadata.json");
+        text = await (await handle.getFile()).text();
+      } catch (error) {
+        if (error && error.name === "NotFoundError") return null;
+        addLog(`  Could not read previous metadata.json: ${error.message}`, "warning");
+        return null;
+      }
+
+      let prior;
+      try {
+        prior = JSON.parse(text);
+      } catch (e) {
+        addLog("  Previous metadata.json is unreadable; processing everything.", "warning");
+        return null;
+      }
+
+      const priorSettings = prior.settings || {};
+      if (
+        !!priorSettings.mergeOverlays !== merge ||
+        !!priorSettings.timestampFilenames !== useTimestamp
+      ) {
+        addLog(
+          "  Found a previous run in this folder, but 'Merge overlays' or " +
+            "'Timestamp-based filenames' has changed — reprocessing everything so " +
+            "the output matches your current settings.",
+          "warning"
+        );
+        return null;
+      }
+
+      const done = new Map();
+      for (const entry of prior.memories || []) {
+        if (entry && entry.status === "success" && entry.source_main) {
+          done.set(entry.source_main, entry);
+        }
+      }
+      if (done.size > 0) {
+        addLog(
+          `  Resuming: ${done.size} memory/memories already completed in this folder.`,
+          "info"
+        );
+      }
+      return done.size > 0 ? done : null;
+    }
+
+    /** Restore the Start/Stop buttons after the local export path finishes or fails. */
+    function resetLocalExportUI() {
+      stopButton.style.display = "none";
+      stopButton.disabled = false;
+      stopButton.textContent = "🛑 Stop & Save Progress";
+      stopButton.style.opacity = "1";
+      startButton.style.display = "inline-block";
+      shouldStop = false;
+    }
+
+    /**
+     * Process a chosen new-format export: merge overlays, embed metadata, and either
+     * emit batched ZIPs or write straight to a folder.
+     * @param {Promise<FileSystemDirectoryHandle>|null} dirHandlePromise - Pending
+     *   showDirectoryPicker() result, started in the click handler so the call still
+     *   carries user activation. Null means ZIP output.
+     */
+    async function processLocalExport(dirHandlePromise = null) {
       const merge = document.getElementById("mergeOverlaysCheckbox").checked;
       const overlaysOnly = document.getElementById("overlaysOnlyCheckbox").checked;
       const videosOnly = document.getElementById("videosOnlyCheckbox").checked;
       const picturesOnly = document.getElementById("picturesOnlyCheckbox").checked;
       const useTimestamp = document.getElementById("timestampFilenamesCheckbox").checked;
+      const batchSize = parseInt(
+        document.getElementById("batchSizeSelect").value || "0",
+        10
+      );
 
-      const exportZip = new JSZip();
+      // A previous session may have permanently disabled FFmpeg after a memory
+      // error; without this reset every later folder run silently skips all video
+      // merges. startDownload() does the same for the link-based path.
+      ffmpegDead = false;
+      ffmpegInitRetries = 0;
+      shouldStop = false;
+
+      logSystemInfo();
+
+      // Resolve the output destination. The picker promise was created during the
+      // click so activation was intact; only its result is awaited here.
+      let sink = null;
+      let resumeState = null;
+      if (dirHandlePromise) {
+        let outDir = null;
+        try {
+          const dirHandle = await dirHandlePromise;
+          const permission =
+            typeof dirHandle.queryPermission === "function"
+              ? await dirHandle.queryPermission({ mode: "readwrite" })
+              : "granted";
+          if (permission !== "granted") {
+            // requestPermission() needs user activation, which is long gone.
+            addLog(
+              "  Write permission was not granted for that folder; falling back to ZIP downloads.",
+              "warning"
+            );
+          } else {
+            outDir = await dirHandle.getDirectoryHandle(LOCAL_EXPORT_OUTPUT_DIR, {
+              create: true,
+            });
+          }
+        } catch (error) {
+          if (error && error.name === "AbortError") {
+            // The user actively declined to pick a folder. Starting a long series
+            // of ZIP downloads instead would be the opposite of what they asked.
+            addLog("Folder selection cancelled — nothing was processed.", "warning");
+            status.textContent = "Cancelled";
+            resetLocalExportUI();
+            return;
+          }
+          addLog(
+            `  Could not open an output folder (${error.name || "error"}: ${error.message}); ` +
+              "falling back to ZIP downloads.",
+            "warning"
+          );
+        }
+
+        if (outDir) {
+          sink = createLocalExportFolderSink(outDir);
+          resumeState = await loadLocalExportResumeState(outDir, merge, useTimestamp);
+          addLog(
+            `Writing files directly into "${LOCAL_EXPORT_OUTPUT_DIR}" — no ZIPs, no size limit.`,
+            "success"
+          );
+          addLog(
+            "  Note: browsers cannot set file modification times this way. Capture " +
+              "dates are still written into each file's metadata.",
+            "info"
+          );
+        }
+      }
+
+      if (!sink) {
+        sink = createLocalExportZipSink(batchSize);
+        addLog(
+          batchSize > 0
+            ? `Packaging into ZIPs of ${batchSize} items (or ~${formatBytes(LOCAL_EXPORT_MAX_ZIP_BYTES)}, whichever comes first).`
+            : `Packaging into a single ZIP, split only if it reaches ~${formatBytes(LOCAL_EXPORT_MAX_ZIP_BYTES)}.`,
+          "info"
+        );
+      }
+
       const metadataList = [];
+      const reserved = new Set();
       const total = localExportMemories.length;
       let merged = 0;
       let copied = 0;
       let skipped = 0;
+      let resumed = 0;
       let errors = 0;
 
       addLog(`\nProcessing ${total} memories from local export...`, "info");
 
       for (let i = 0; i < total; i++) {
         if (shouldStop) {
-          addLog("⏸ Stopped — packaging what was processed so far.", "warning");
+          addLog("⏸ Stopped — saving what was processed so far.", "warning");
           break;
         }
         const mem = localExportMemories[i];
@@ -2898,6 +3373,19 @@
         );
         const ext = mainName.slice(mainName.lastIndexOf("."));
         const isVideo = isVideoName(mainName);
+
+        // Reserve the output name for every memory, before the filters, so a name
+        // depends only on the folder contents and never on which filters are on.
+        // That is what lets the folder sink resume safely across runs.
+        const desiredName =
+          useTimestamp && mem.date !== "Unknown"
+            ? generateFilename(mem.date, ext, true, String(i + 1).padStart(2, "0"))
+            : stripMainSuffix(mainName);
+        const outName = reserveOutputName(
+          reserved,
+          sanitizeOutputName(desiredName, i, ext),
+          i
+        );
 
         if (
           (videosOnly && !isVideo) ||
@@ -2908,10 +3396,25 @@
           continue;
         }
 
-        const outName =
-          useTimestamp && mem.date !== "Unknown"
-            ? generateFilename(mem.date, ext, true, String(i + 1).padStart(2, "0"))
-            : mainName.replace("-main", "");
+        // Resume: keep the prior entry so the rewritten metadata.json stays complete.
+        if (resumeState && resumeState.has(mainName)) {
+          const prior = resumeState.get(mainName);
+          const paths = (prior.files || []).map((f) => f.path);
+          let allPresent = paths.length > 0;
+          for (const p of paths) {
+            if (!(await sink.isAlreadyDone(p))) {
+              allPresent = false;
+              break;
+            }
+          }
+          if (allPresent) {
+            resumed++;
+            metadataList.push(prior);
+            addLog(`[${i + 1}/${total}] ${mainName} — already done, skipping`, "info");
+            setLocalExportProgress(i + 1, total);
+            continue;
+          }
+        }
 
         status.textContent = `[${i + 1}/${total}] ${mainName}`;
         addLog(`[${i + 1}/${total}] ${mainName}`, "info");
@@ -2928,12 +3431,12 @@
             : null,
         };
 
+        let videoMerged = false;
         try {
           let outData = await mem.mainFile.arrayBuffer();
           let didMerge = false;
           const fileDate = safeParseSnapchatDate(mem.date);
-          const zipOpts = {};
-          if (fileDate) zipOpts.date = fileDate;
+          const fileOpts = fileDate ? { date: fileDate } : {};
 
           if (isVideo) {
             if (mem.overlayFile && merge) {
@@ -2944,26 +3447,44 @@
               const overlayIsImage = !isVideoName(overlayName);
               const overlayData = await mem.overlayFile.arrayBuffer();
               addLog("  Merging video overlay (FFmpeg.wasm)...", "info");
-              const result = await mergeVideoOverlay(
-                outData,
-                overlayData,
-                null,
-                overlayIsImage,
-                overlayExt
-              );
+
+              let result = null;
+              try {
+                result = await mergeVideoOverlay(
+                  outData,
+                  overlayData,
+                  null,
+                  overlayIsImage,
+                  overlayExt
+                );
+              } catch (mergeError) {
+                // mergeVideoOverlay throws on FFmpeg failure. We already hold a
+                // perfectly good unmerged main buffer, so keep the memory rather
+                // than losing the file to a failed merge.
+                addLog(`  Video merge failed: ${mergeError.message}`, "warning");
+                entry.merge_failed = true;
+              }
+
               if (result) {
                 outData = result;
                 didMerge = true;
+                videoMerged = true;
               } else {
                 addLog(
-                  "  Video merge unavailable; saving main + overlay separately.",
+                  "  Saving main + overlay separately instead.",
                   "warning"
                 );
-                const ovOut = overlayName.replace("-main", "");
-                exportZip.file(ovOut, overlayData, {
-                  ...zipOpts,
-                  compression: "STORE",
-                });
+                // Keep the "-overlay" marker: unlike the merged case, the user ends
+                // up with two files here and needs to know which is which. (The old
+                // code tried to strip "-main" from an overlay name, which was a
+                // no-op and, without the output subfolder, would have written the
+                // file straight back over the user's own source overlay.)
+                const ovOut = reserveOutputName(
+                  reserved,
+                  sanitizeOutputName(overlayName, i, overlayExt),
+                  i
+                );
+                await sink.addFile(ovOut, overlayData, { ...fileOpts, store: true });
                 entry.overlay_saved_separately = ovOut;
               }
             }
@@ -2977,8 +3498,7 @@
             } catch (e) {
               // Non-fatal: keep the video without container metadata.
             }
-            // Videos are already compressed — STORE avoids breaking playback.
-            exportZip.file(outName, outData, { ...zipOpts, compression: "STORE" });
+            await sink.addFile(outName, outData, { ...fileOpts, store: true });
           } else {
             if (mem.overlayFile && merge) {
               const overlayData = await mem.overlayFile.arrayBuffer();
@@ -2991,12 +3511,15 @@
               mem.latitude,
               mem.longitude
             );
-            exportZip.file(outName, outData, zipOpts);
+            await sink.addFile(outName, outData, fileOpts);
           }
 
           entry.status = "success";
           entry.type = didMerge ? "merged" : "single";
           entry.files = [{ path: outName, type: entry.type }];
+          if (entry.overlay_saved_separately) {
+            entry.files.push({ path: entry.overlay_saved_separately, type: "overlay" });
+          }
           if (didMerge) merged++;
           else copied++;
           addLog(`  ${didMerge ? "Merged" : "Saved"}: ${outName}`, "success");
@@ -3008,30 +3531,28 @@
         }
 
         metadataList.push(entry);
-        progressFill.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+        setLocalExportProgress(i + 1, total);
+
+        // Only ever a batch boundary between whole memories, so a main file and its
+        // separately-saved overlay can never land in two different ZIPs.
+        await sink.itemComplete(metadataList, { videoMerged });
       }
 
-      exportZip.file(
-        "metadata.json",
-        JSON.stringify(
-          { settings: { source: "local-export" }, memories: metadataList },
-          null,
-          2
-        )
-      );
+      await sink.finish(metadataList);
 
-      status.textContent = "Creating ZIP...";
-      addLog("\n📦 Packaging snapchat-memories-merged.zip...", "info");
-      const blob = await exportZip.generateAsync({ type: "blob" });
-      downloadBlob(blob, "snapchat-memories-merged.zip");
-
-      addLog(
-        `\n✅ Done! ${merged} merged, ${copied} copied, ${skipped} skipped, ${errors} errors.`,
-        "success"
-      );
+      const parts = [`${merged} merged`, `${copied} copied`];
+      if (resumed) parts.push(`${resumed} already done`);
+      parts.push(`${skipped} skipped`, `${errors} errors`);
+      addLog(`\n✅ Done! ${parts.join(", ")}.`, "success");
       status.textContent = "Complete!";
-      stopButton.style.display = "none";
-      startButton.style.display = "inline-block";
+      resetLocalExportUI();
+    }
+
+    /** Keep the progress bar's width and its label in sync. */
+    function setLocalExportProgress(done, total) {
+      const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+      progressFill.style.width = `${percent}%`;
+      progressFill.textContent = `${percent}%`;
     }
 
     function handleStartDownload() {
@@ -3045,10 +3566,27 @@
 
       // New bundled-media export path (folder picker) vs. classic URL download.
       if (localExportMode) {
-        processLocalExport().catch((err) => {
-          addLog(`Fatal error: ${err.message}`, "error");
-          stopButton.style.display = "none";
-          startButton.style.display = "inline-block";
+        // showDirectoryPicker() must be called while the click still counts as user
+        // activation, so start it here - synchronously, before anything awaits - and
+        // hand the pending promise to processLocalExport to await. The catch is
+        // attached immediately so a cancel can't surface as an unhandled rejection.
+        let dirHandlePromise = null;
+        if (canWriteToFolder() && document.getElementById("writeToFolderCheckbox").checked) {
+          dirHandlePromise = window.showDirectoryPicker({ mode: "readwrite" });
+          dirHandlePromise.catch(() => {});
+        }
+
+        processLocalExport(dirHandlePromise).catch((err) => {
+          if (err instanceof RangeError || err.message?.includes("allocation")) {
+            addLog(`❌ Out of memory: ${err.message}`, "error");
+            addLog("  Your export is too large to package at the current settings.", "error");
+            addLog("  💡 SOLUTION: Reduce batch size in settings (try 10 or 20 items)", "warning");
+            addLog('  💡 Better: enable "Save directly to a folder" in Advanced Options — it writes one file at a time and has no size limit', "warning");
+          } else {
+            addLog(`Fatal error: ${err.message}`, "error");
+          }
+          status.textContent = "Failed";
+          resetLocalExportUI();
         });
         return;
       }
