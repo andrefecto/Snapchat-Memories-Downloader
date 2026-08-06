@@ -1,64 +1,89 @@
 name: Sync ffmpeg.wasm artifacts
 
+# pull_request_target, not pull_request: workflows triggered by Dependabot on a
+# plain pull_request event get a read-only GITHUB_TOKEN regardless of the
+# permissions block below, so the commit-and-push at the end could never
+# succeed. pull_request_target runs the base branch's workflow definition with a
+# writable token.
+#
+# SECURITY: because this has write access, it must never execute code from the
+# pull request. The job guard below restricts it to Dependabot branches in this
+# repository, and `npm ci --ignore-scripts` prevents lifecycle scripts declared
+# in the PR's package.json / lockfile from running.
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - "package.json"
       - "package-lock.json"
     types: [opened, synchronize]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-ffmpeg-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: true
+
 jobs:
   sync-ffmpeg:
-    if: github.actor == 'dependabot[bot]'
+    # Dependabot branches live in this repo, never in a fork - requiring both
+    # keeps a fork PR from reaching this job.
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - name: Checkout PR
+      # Check out the PR's branch by name. The default for a PR event is the
+      # detached refs/pull/N/merge commit, which has no upstream branch and so
+      # cannot be pushed to.
+      - name: Checkout PR branch
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
 
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Sync ffmpeg files to docs/
         run: |
+          set -euo pipefail
           mkdir -p docs/ffmpeg
 
-          # Copy ffmpeg.js files
-          cp node_modules/@ffmpeg/ffmpeg/dist/umd/ffmpeg.js \
-             docs/ffmpeg/ffmpeg.js
+          # Glob rather than naming chunks explicitly: the bundled chunk is
+          # named after a webpack module id (e.g. 814.ffmpeg.js) that gets
+          # renamed by @ffmpeg/ffmpeg version bumps - exactly the PRs this
+          # workflow runs on.
+          cp node_modules/@ffmpeg/ffmpeg/dist/umd/*.js \
+             node_modules/@ffmpeg/ffmpeg/dist/umd/*.js.map \
+             docs/ffmpeg/
 
-          cp node_modules/@ffmpeg/ffmpeg/dist/umd/ffmpeg.js.map \
-             docs/ffmpeg/ffmpeg.js.map
-
-          cp node_modules/@ffmpeg/ffmpeg/dist/umd/814.ffmpeg.js \
-             docs/ffmpeg/814.ffmpeg.js
-
-          cp node_modules/@ffmpeg/ffmpeg/dist/umd/814.ffmpeg.js.map \
-             docs/ffmpeg/814.ffmpeg.js.map
-
-          # Copy ffmpeg-core files
           cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.js \
-             docs/ffmpeg/ffmpeg-core.js
-
-          cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm \
-             docs/ffmpeg/ffmpeg-core.wasm
+             node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm \
+             docs/ffmpeg/
 
       - name: Commit ffmpeg artifacts
         run: |
+          set -euo pipefail
           git config user.name "dependabot[bot]"
-          git config user.email "dependabot[bot]@users.noreply.github.com"
+          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
 
           git add docs/ffmpeg
-          git commit -m "chore: sync ffmpeg.wasm artifacts" || echo "No changes to commit"
-          git push
+          if git diff --quiet --cached; then
+            echo "docs/ffmpeg already matches the installed packages; nothing to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync ffmpeg.wasm artifacts"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
