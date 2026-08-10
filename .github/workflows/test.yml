@@ -78,7 +78,7 @@ jobs:
     - name: Cache FFmpeg (Windows)
       if: runner.os == 'Windows'
       id: cache-ffmpeg
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}\ffmpeg
         key: ${{ env.FFMPEG_WIN_CACHE_KEY }}
