@@ -2,5 +2,5 @@ requests>=2.34.2
 Pillow>=13.0.0
 piexif>=1.1.3
 timezonefinder>=9.2.0
-pytz>=2026.5
+pytz>=2026.6
 PyQt6>=6.11.0
