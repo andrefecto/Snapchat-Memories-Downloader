@@ -135,7 +135,7 @@ Detects videos within 10-second time windows (indicates multi-snap stories):
 - `hashlib` - MD5 for duplicate detection
 
 **Web Dependencies**:
-- `JSZip` 3.10.1 - ZIP file handling
+- `JSZip` 3.10.2 - ZIP file handling
 - `piexifjs` 1.0.6 - EXIF for JPEG only (browser limitation)
 - `FFmpeg.wasm` - WebAssembly FFmpeg (lazy-loaded)
 - Vanilla JavaScript, HTML5 File API
