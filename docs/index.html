@@ -601,6 +601,18 @@
         <input type="file" id="folderInput" webkitdirectory directory multiple />
         <label for="folderInput" class="btn" style="background: #667eea">Choose Export Folder</label>
         <p id="folderName" style="margin-top: 10px; color: #667eea; font-weight: 600"></p>
+        <!-- Shown only when the chosen folder has no usable memories_history.json -->
+        <div id="localJsonOption" style="display: none; margin-top: 10px">
+          <p style="color: #856404; margin-bottom: 8px; font-size: 14px">
+            ⚠️ No <code>memories_history.json</code> found, so GPS locations and exact
+            capture times won't be embedded. Choose the top-level export folder (the one
+            containing both <code>json</code> and <code>memories</code>), or add the file
+            here. Exports split into several ZIPs keep it in only one part's
+            <code>json</code> folder.
+          </p>
+          <input type="file" id="localJsonInput" accept=".json" />
+          <label for="localJsonInput" class="btn" style="background: #28a745">Add memories_history.json</label>
+        </div>
       </div>
 
       <div style="
@@ -2470,6 +2482,41 @@
       });
     }
 
+    // memories_history.json supplied separately, e.g. from another part of a
+    // split export, when the chosen folder didn't contain it.
+    const localJsonInput = document.getElementById("localJsonInput");
+    if (localJsonInput) {
+      localJsonInput.addEventListener("change", async (e) => {
+        const file = e.target.files[0];
+        e.target.value = ""; // let the same file be picked again after a new folder
+        // Ignore it mid-run: swapping metadata partway would leave a mixed output.
+        if (!file || !localExportMode || stopButton.style.display === "inline-block") return;
+        const meta = parseMemoriesJsonText(await file.text());
+        if (meta.length === 0) {
+          addLog(
+            `${file.name} has no "Saved Media" entries — is it memories_history.json?`,
+            "error"
+          );
+          return;
+        }
+        const matched = matchLocalExportMetadata(meta);
+        if (matched === 0) {
+          addLog(
+            `None of the ${meta.length} entries in ${file.name} match these files — ` +
+              "is it from a different export?",
+            "error"
+          );
+          return;
+        }
+        addLog(
+          `Matched ${matched} of ${localExportMemories.length} memories to ${file.name}; ` +
+            "their GPS and capture times will be embedded.",
+          "success"
+        );
+        document.getElementById("localJsonOption").style.display = "none";
+      });
+    }
+
     /**
      * Whether direct-to-disk writing is possible. The File System Access API is
      * Chromium-desktop-only, needs a secure context, and is blocked in iframes.
@@ -2842,6 +2889,20 @@
       return candidate;
     }
 
+    // Timestamp-join tolerance: ZIP (DOS) timestamps have 2-second resolution.
+    const LOCAL_JOIN_TOLERANCE_MS = 2000;
+
+    /**
+     * A memories_history "Date" (e.g. "2016-07-09 20:48:02 UTC") as epoch ms,
+     * read as LOCAL time, or null. Extraction writes each file's tz-naive DOS
+     * timestamp - the same UTC wall-clock - as local time, so File.lastModified
+     * equals this value rather than the true UTC instant.
+     */
+    function memoryWallClockMs(dateStr) {
+      const m = (dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+      return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : null;
+    }
+
     /** Normalize json/memories_history.json text into memory metadata. */
     function parseMemoriesJsonText(text) {
       let data;
@@ -2881,6 +2942,7 @@
     async function handleExportFolder(fileList) {
       const files = Array.from(fileList || []);
       if (files.length === 0) return;
+      document.getElementById("localJsonOption").style.display = "none";
 
       const mainFiles = [];
       const overlaysByBase = {};
@@ -2934,32 +2996,133 @@
         }
       }
 
-      const meta = jsonFile ? parseMemoriesJsonText(await jsonFile.text()) : [];
-
-      // Match each file to a JSON entry that shares its capture DATE. The JSON has
-      // no filename field AND lists entries newest-first while the gallery/files are
-      // oldest-first, so positional alignment would mismatch everything. Grouping by
-      // date is direction-agnostic; within a date, entries are consumed in
-      // chronological order, lining up with the gallery's chronological order.
-      const byDate = {};
-      const sortedMeta = meta
-        .slice()
-        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-      for (const m of sortedMeta) {
-        const day = datePrefixFromName(m.date);
-        if (!day) continue;
-        (byDate[day] = byDate[day] || []).push(m);
-      }
-
-      let unmatched = 0;
       localExportMemories = ordered.map((mainFile) => {
         const name = pathBasename(mainFile.webkitRelativePath || mainFile.name);
         const base = name.slice(0, name.lastIndexOf("-main"));
-        const overlayFile = overlaysByBase[base] || null;
+        return { mainFile, overlayFile: overlaysByBase[base] || null };
+      });
+      const meta = jsonFile ? parseMemoriesJsonText(await jsonFile.text()) : [];
+      matchLocalExportMetadata(meta);
 
+      localExportMode = true;
+
+      // Reveal the direct-to-disk option, which only applies to this path.
+      const writeToFolderOption = document.getElementById("writeToFolderOption");
+      if (writeToFolderOption && canWriteToFolder()) {
+        writeToFolderOption.style.display = "";
+      }
+      // Deferral exists to stop merged videos accumulating in a growing ZIP and to
+      // keep FFmpeg from blocking network downloads. Neither applies here: there is
+      // no network, and FFmpeg's peak per video is the same whenever it runs. Leaving
+      // the box visibly checked but inert would just mislead.
+      const deferCheckbox = document.getElementById("deferVideoOverlaysCheckbox");
+      if (deferCheckbox) {
+        deferCheckbox.disabled = true;
+        deferCheckbox.closest(".option-item").style.opacity = "0.5";
+      }
+
+      const withOverlay = localExportMemories.filter((m) => m.overlayFile).length;
+      addLog(
+        `Detected new export format: ${localExportMemories.length} memories ` +
+          `(${withOverlay} with overlays).`,
+        "success"
+      );
+      // Without the JSON every memory silently ends up with no GPS (issue #53), so
+      // say so loudly; the full explanation sits in the #localJsonOption prompt.
+      if (meta.length === 0) {
+        addLog(
+          "Warning: no usable memories_history.json — GPS locations and exact " +
+            "capture times will NOT be embedded.",
+          "warning"
+        );
+      }
+      document.getElementById("localJsonOption").style.display = meta.length ? "none" : "";
+      document.getElementById("folderName").textContent =
+        `${localExportMemories.length} memories ready (${withOverlay} with overlays). Click "Start" to merge & download.`;
+      startButton.style.display = "inline-block";
+    }
+
+    /**
+     * Attach date/type/GPS from parsed memories_history.json entries to each
+     * scanned memory (empty array = no metadata available).
+     * @returns {number} How many memories got a JSON entry
+     */
+    function matchLocalExportMetadata(meta) {
+      // Match each file to its JSON entry. The JSON has no filename field AND lists
+      // entries newest-first while the gallery/files are oldest-first, so positional
+      // alignment would mismatch everything.
+      //
+      // Primary key: the file's capture timestamp. A correct extraction preserves
+      // each file's mtime as its capture time, equal to the JSON "Date" within the
+      // ZIP's 2-second resolution. Unlike date-bucket ordering, this stays right on
+      // days with several memories and when only part of a split export is present
+      // (issue #53), where the queue below would hand out the day's earliest entries.
+      //
+      // Fallback (per file, e.g. mtimes not preserved on extraction): the next unused
+      // entry sharing the file's DATE, consumed in chronological order. Mirrors
+      // process_local_export() in download_memories.py.
+      const records = meta
+        .slice()
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+        .map((m) => ({ m, t: memoryWallClockMs(m.date), used: false }));
+      const byDate = {};
+      for (const r of records) {
+        const day = datePrefixFromName(r.m.date);
+        if (day) (byDate[day] = byDate[day] || []).push(r);
+      }
+      const dated = records.filter((r) => r.t !== null).sort((a, b) => a.t - b.t);
+
+      function matchByTimestamp(mainFile, want) {
+        const mt = mainFile.lastModified;
+        if (!mt) return null;
+        // First record at or after the start of the tolerance window.
+        let lo = 0;
+        let hi = dated.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (dated[mid].t < mt - LOCAL_JOIN_TOLERANCE_MS) lo = mid + 1;
+          else hi = mid;
+        }
+        let best = null;
+        let bestRank = null;
+        for (let i = lo; i < dated.length && dated[i].t <= mt + LOCAL_JOIN_TOLERANCE_MS; i++) {
+          const r = dated[i];
+          if (r.used) continue;
+          // Prefer a matching media type first, then the nearest timestamp.
+          const rank = [r.m.mediaType === want ? 0 : 1, Math.abs(r.t - mt)];
+          if (!bestRank || rank[0] < bestRank[0] || (rank[0] === bestRank[0] && rank[1] < bestRank[1])) {
+            best = r;
+            bestRank = rank;
+          }
+        }
+        return best;
+      }
+
+      // Two passes: every timestamp match is claimed before any fallback runs, so a
+      // fallback can never take an entry that a later file matches exactly.
+      const names = localExportMemories.map(({ mainFile }) =>
+        pathBasename(mainFile.webkitRelativePath || mainFile.name)
+      );
+      const recs = localExportMemories.map(({ mainFile }, i) => {
+        const rec = matchByTimestamp(mainFile, isVideoName(names[i]) ? "Video" : "Image");
+        if (rec) rec.used = true;
+        return rec;
+      });
+
+      let unmatched = 0;
+      localExportMemories = localExportMemories.map(({ mainFile, overlayFile }, i) => {
+        const name = names[i];
         const fileDay = datePrefixFromName(name);
+        let rec = recs[i];
         const queue = fileDay ? byDate[fileDay] : null;
-        const entry = queue && queue.length ? queue.shift() : {};
+        while (!rec && queue && queue.length) {
+          const cand = queue.shift();
+          if (!cand.used) {
+            rec = cand;
+            rec.used = true;
+          }
+        }
+        const entry = rec ? rec.m : {};
         if (!entry.date && meta.length) unmatched++;
 
         let date = entry.date || "Unknown";
@@ -2982,33 +3145,7 @@
           "warning"
         );
       }
-
-      localExportMode = true;
-
-      // Reveal the direct-to-disk option, which only applies to this path.
-      const writeToFolderOption = document.getElementById("writeToFolderOption");
-      if (writeToFolderOption && canWriteToFolder()) {
-        writeToFolderOption.style.display = "";
-      }
-      // Deferral exists to stop merged videos accumulating in a growing ZIP and to
-      // keep FFmpeg from blocking network downloads. Neither applies here: there is
-      // no network, and FFmpeg's peak per video is the same whenever it runs. Leaving
-      // the box visibly checked but inert would just mislead.
-      const deferCheckbox = document.getElementById("deferVideoOverlaysCheckbox");
-      if (deferCheckbox) {
-        deferCheckbox.disabled = true;
-        deferCheckbox.closest(".option-item").style.opacity = "0.5";
-      }
-
-      const withOverlay = localExportMemories.filter((m) => m.overlayFile).length;
-      addLog(
-        `Detected new export format: ${localExportMemories.length} memories ` +
-          `(${withOverlay} with overlays)${jsonFile ? "" : " — no JSON metadata found"}.`,
-        "success"
-      );
-      document.getElementById("folderName").textContent =
-        `${localExportMemories.length} memories ready (${withOverlay} with overlays). Click "Start" to merge & download.`;
-      startButton.style.display = "inline-block";
+      return meta.length ? localExportMemories.length - unmatched : 0;
     }
 
     /** Serialize the running metadata list the same way both sinks want it. */
@@ -3397,8 +3534,15 @@
         }
 
         // Resume: keep the prior entry so the rewritten metadata.json stays complete.
-        if (resumeState && resumeState.has(mainName)) {
-          const prior = resumeState.get(mainName);
+        // A prior run without memories_history.json wrote these files with no GPS
+        // (issue #53), so only reuse its output when the metadata still matches.
+        const prior = resumeState && resumeState.get(mainName);
+        if (
+          prior &&
+          prior.date === mem.date &&
+          prior.latitude === mem.latitude &&
+          prior.longitude === mem.longitude
+        ) {
           const paths = (prior.files || []).map((f) => f.path);
           let allPresent = paths.length > 0;
           for (const p of paths) {
