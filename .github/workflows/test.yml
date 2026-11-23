@@ -18,9 +18,9 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  # Single place to bump the tested interpreter. README documents 3.11+ as the
+  # Single place to bump the tested interpreter. README documents 3.12+ as the
   # supported floor; CI tracks the latest stable.
-  PYTHON_VERSION: '3.14'
+  PYTHON_VERSION: '3.15'
   # Bump this date to pick up a newer FFmpeg on Windows. The cache is keyed on
   # it, so a stale key is what keeps the ~120 MB download from repeating.
   FFMPEG_WIN_CACHE_KEY: ffmpeg-win64-gpl-2026-08-06

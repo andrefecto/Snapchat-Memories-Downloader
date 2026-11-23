@@ -33,7 +33,7 @@ source venv/bin/activate
 pip install pytest pytest-cov pytest-xdist   # test tooling
 ```
 
-Requirements: **Python 3.11+**. Video overlay merging needs **FFmpeg** installed and
+Requirements: **Python 3.12+**. Video overlay merging needs **FFmpeg** installed and
 on your `PATH` (`brew install ffmpeg`, `apt-get install ffmpeg`, or `choco install ffmpeg`).
 
 ### Running the tests
@@ -42,9 +42,9 @@ on your `PATH` (`brew install ffmpeg`, `apt-get install ffmpeg`, or `choco insta
 pytest test_download_memories.py -v
 ```
 
-Please add or update tests for any behavior you change. Tests must pass on the
-supported matrix (Python 3.11 / 3.12 on Linux, macOS, and Windows) — CI runs this
-automatically on every pull request.
+Please add or update tests for any behavior you change. Tests must pass on
+Python 3.12+ — CI runs them automatically on every pull request with the latest
+stable Python on macOS and Windows.
 
 ### Quick manual check
 
