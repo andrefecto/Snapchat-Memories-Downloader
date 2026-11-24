@@ -1890,6 +1890,17 @@
     }
 
     /**
+     * One ISO 6709 coordinate: explicit sign, zero-padded integer part, 4 decimals
+     * (latitude "+05.5000", longitude "-000.1276"). Same as Python's {:+08.4f} /
+     * {:+09.4f}. The sign must come before the padding, not inside it.
+     * @param {number} value - Decimal degrees
+     * @param {number} intDigits - 2 for latitude, 3 for longitude
+     */
+    function iso6709Part(value, intDigits) {
+      return (value < 0 ? "-" : "+") + Math.abs(value).toFixed(4).padStart(intDigits + 5, "0");
+    }
+
+    /**
      * Add GPS and timestamp metadata to video using FFmpeg.wasm
      *
      * Adds creation_time and GPS location metadata to MP4 files for compatibility
@@ -1977,9 +1988,13 @@
           "-metadata", `location=${lat >= 0 ? '+' : ''}${lat.toFixed(6)}${lon >= 0 ? '+' : ''}${lon.toFixed(6)}/`,
           "-metadata", `location-eng=${lat}, ${lon}`,
           // QuickTime-specific metadata (CRITICAL for Apple Photos)
-          "-metadata", `com.apple.quicktime.creationdate=${creationTime}`,
+          // Apple's own format has no fractional seconds (matches the Python version)
+          "-metadata", `com.apple.quicktime.creationdate=${creationTime.replace(/\.\d{3}Z$/, "Z")}`,
           "-metadata", `com.apple.quicktime.make=Snapchat`,
-          "-metadata", `com.apple.quicktime.location.ISO6709=${lat >= 0 ? '+' : ''}${lat.toFixed(4).padStart(8, '0')}${lon >= 0 ? '+' : ''}${lon.toFixed(4).padStart(9, '0')}/`,
+          "-metadata", `com.apple.quicktime.location.ISO6709=${iso6709Part(lat, 2)}${iso6709Part(lon, 3)}/`,
+          // Without this the MP4 muxer silently drops every custom key above,
+          // including the com.apple.quicktime.* ones Apple Photos reads (#56)
+          "-movflags", "use_metadata_tags",
           // Stream copy - no re-encoding
           "-codec", "copy",  // Copy streams without re-encoding (fast!)
           "-y",              // Overwrite output

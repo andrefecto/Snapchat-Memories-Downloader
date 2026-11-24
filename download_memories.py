@@ -559,6 +559,9 @@ def update_video_metadata(
             ])
         
         cmd.extend([
+            # Without this the MP4 muxer silently drops every custom key above,
+            # including the com.apple.quicktime.* ones Apple Photos reads (#56)
+            "-movflags", "use_metadata_tags",
             "-codec", "copy",  # Copy streams without re-encoding
             "-y",  # Overwrite output
             str(video_path)
