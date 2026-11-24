@@ -680,6 +680,65 @@ class TestVideoMerging:
             assert output_video.exists()
 
 
+class TestVideoMetadata:
+    """Test video metadata embedding (creation date + GPS)"""
+
+    @staticmethod
+    def read_format_tags(video_path):
+        """Return the container-level tags of a video as reported by ffprobe"""
+        import subprocess
+
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format_tags',
+                '-of', 'json',
+                str(video_path)
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=True
+        )
+        return json.loads(result.stdout).get('format', {}).get('tags', {})
+
+    @pytest.mark.skipif(
+        not hasattr(__import__('download_memories'), 'ffmpeg_available') or
+        not __import__('download_memories').ffmpeg_available or
+        not __import__('shutil').which('ffprobe'),
+        reason="FFmpeg/ffprobe not available"
+    )
+    @pytest.mark.parametrize("lat,lon,iso6709", [
+        ("34.05", "-118.25", "+34.0500-118.2500/"),
+        ("-5.5", "0.1276", "-05.5000+000.1276/"),
+        ("-33.8688", "151.2093", "-33.8688+151.2093/"),
+        ("0", "0", "+00.0000+000.0000/"),
+    ])
+    def test_update_video_metadata_writes_apple_quicktime_tags(self, tmp_path, lat, lon, iso6709):
+        """Apple Photos reads location/date only from com.apple.quicktime.* keys (#56)"""
+        from download_memories import update_video_metadata
+
+        video = tmp_path / 'video.mp4'
+        if not TestVideoMerging.create_minimal_video(video, duration_sec=1):
+            pytest.skip("Could not create test video")
+
+        success = update_video_metadata(
+            video,
+            "2025-03-01 09:00:00 UTC",
+            latitude=lat,
+            longitude=lon,
+            use_local_timezone=False
+        )
+        assert success is True
+
+        tags = self.read_format_tags(video)
+        assert tags.get('com.apple.quicktime.location.ISO6709') == iso6709
+        assert tags.get('com.apple.quicktime.creationdate') == '2025-03-01T09:00:00Z'
+        # The generic tags must survive use_metadata_tags too
+        assert tags.get('creation_time', '').startswith('2025-03-01T09:00:00')
+        assert 'location' in tags
+
+
 class TestEXIFMetadata:
     """Test EXIF metadata embedding"""
 
